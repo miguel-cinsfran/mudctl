@@ -1,22 +1,2 @@
-[project]
-name = "mudctl"
-version = "0.1.0"
-description = "CLI FTP para Reinos de Leyenda — gestion de archivos para agentes"
-requires-python = ">=3.11"
-dependencies = [
-    "python-dotenv>=1.0.0",
-]
-
-[project.scripts]
-mudctl = "mudctl.cli:main"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[dependency-groups]
-dev = ["pytest>=8.0"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = ["-v"]
+[tool.uv]
+dev-dependencies = ["pytest>=8.0"]

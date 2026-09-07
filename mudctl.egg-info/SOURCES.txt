@@ -2,6 +2,7 @@ pyproject.toml
 mudctl/__init__.py
 mudctl/__main__.py
 mudctl/backend.py
+mudctl/cli.py
 mudctl/commands.py
 mudctl/errors.py
 mudctl/output.py
