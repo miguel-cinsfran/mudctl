@@ -1,6 +1,8 @@
-{
-    "name": "mudctl",
-    "version": "0.1.0",
-    "private": true,
-    "envs": [".env"]
-}
+.env
+*.egg-info
+__pycache__
+*.pyc
+.venv
+dist/
+build/
+*.egg
