@@ -53,6 +53,23 @@ mudctl info /zona/archivo.c
 
 # Mover un archivo remoto
 mudctl move /zona/old.c /zona/new.c
+
+# Bajar una carpeta entera de otro inmo
+mudctl get /otros/mago ./mago --recursive
+
+# Subir una carpeta entera a tu casa (dry-run primero)
+mudctl put ./mipack /hazrakh/mipack --recursive --dry-run
+mudctl put ./mipack /hazrakh/mipack --recursive --yes --expect 12
+
+# Copiar dentro del servidor sin bajar nada
+mudctl cp /otros/mago/espada.c /hazrakh/espada.c --dry-run
+mudctl cp /otros/mago/espada.c /hazrakh/espada.c --yes
+
+# Crear tu versión desde un ejemplo ajeno sin pisar nada
+mudctl scaffold /otros/mago/espada.c /hazrakh/mi_espada.c --yes
+
+# Buscar texto dentro de ficheros de otras carpetas
+mudctl grep "hereda de" /otros --case-insensitive --max 20
 ```
 
 ## Opciones globales

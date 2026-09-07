@@ -19,6 +19,7 @@ def load_config() -> dict[str, str]:
         "timeout": int(_env("MUD_TIMEOUT", "30")),
         "encoding": _env("MUD_ENCODING", "utf-8"),
         "root": _env("MUD_ROOT", "/"),
+        "home": _env("MUD_HOME", f"/{_env('MUD_USER', 'hazrakh')}"),
     }
 
 

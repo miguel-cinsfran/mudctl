@@ -37,6 +37,9 @@ def run(backend: FTPBackend, argv: list[str] | None = None) -> int:
         "cat": lambda: handle_cat(backend, rest),
         "info": lambda: handle_info(backend, rest),
         "move": lambda: handle_move(backend, rest),
+        "cp": lambda: handle_cp(backend, rest),
+        "grep": lambda: handle_grep(backend, rest),
+        "scaffold": lambda: handle_scaffold(backend, rest),
         "describe": lambda: make_result(True, "describe", data={"help": backend.describe()}),
     }
 
@@ -83,11 +86,12 @@ def handle_list(backend: FTPBackend, args: list[str]) -> Result:
 
 
 def handle_get(backend: FTPBackend, args: list[str]) -> Result:
-    if not args:
-        return make_result(False, "get", error={"code": "USAGE", "message": "Usage: mudctl get <remote_path> [local_path]", "hint": "Provide at least the remote path."})
+    if not args or args[0].startswith("--"):
+        return make_result(False, "get", error={"code": "USAGE", "message": "Usage: mudctl get <remote_path> [local_path] [--recursive]", "hint": "Provide at least the remote path."})
     remote_path = args[0]
-    local_path = args[1] if len(args) > 1 else None
-    data = backend.get(remote_path, local_path)
+    local_path = args[1] if len(args) > 1 and not args[1].startswith("--") else None
+    recursive = "--recursive" in args
+    data = backend.get(remote_path, local_path, recursive=recursive)
     if "status" in data and data["status"] == "ok":
         return make_result(True, "get", data=data)
     return make_result(False, "get", error=data)
@@ -99,6 +103,7 @@ def handle_put(backend: FTPBackend, args: list[str]) -> Result:
     local_path = args[0]
     remote_path = args[1]
     dry_run = ("--dry-run" in args) or ("--yes" not in args)
+    recursive = "--recursive" in args
     yes = "--yes" in args
     expect = None
     for i, a in enumerate(args):
@@ -107,9 +112,9 @@ def handle_put(backend: FTPBackend, args: list[str]) -> Result:
                 expect = int(args[i + 1])
             except ValueError:
                 return make_result(False, "put", error={"code": "USAGE", "message": "Expect debe ser numero", "hint": "Usa --expect N con N entero"})
-    if expect is not None and expect != 1:
+    if expect is not None and not recursive and expect != 1:
         return make_result(False, "put", error={"code": "ABORTED", "message": f"Expect {expect} no coincide con 1", "hint": "Revisa --expect"})
-    data = backend.put(local_path, remote_path, dry_run=dry_run)
+    data = backend.put(local_path, remote_path, dry_run=dry_run, recursive=recursive, expect=expect)
     if "status" in data and data["status"] == "ok":
         return make_result(True, "put", data=data)
     return make_result(False, "put", error=data)
@@ -203,3 +208,47 @@ def handle_move(backend: FTPBackend, args: list[str]) -> Result:
     if "status" in data and data["status"] == "ok":
         return make_result(True, "move", data=data)
     return make_result(False, "move", error=data)
+
+
+def handle_cp(backend: FTPBackend, args: list[str]) -> Result:
+    if len(args) < 2:
+        return make_result(False, "cp", error={"code": "USAGE", "message": "Usage: mudctl cp <source> <destination> [--dry-run] [--yes]", "hint": "Copia dentro del servidor, el destino debe estar en tu carpeta."})
+    source = args[0]
+    destination = args[1]
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
+    data = backend.cp(source, destination, dry_run=dry_run)
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "cp", data=data)
+    return make_result(False, "cp", error=data)
+
+
+def handle_grep(backend: FTPBackend, args: list[str]) -> Result:
+    if not args:
+        return make_result(False, "grep", error={"code": "USAGE", "message": "Usage: mudctl grep <pattern> [path] [--regex] [--case-insensitive] [--max N]", "hint": "Provide at least the search pattern."})
+    pattern = args[0]
+    path = args[1] if len(args) > 1 and not args[1].startswith("--") else "/"
+    regex = "--regex" in args
+    case_insensitive = "--case-insensitive" in args
+    max_hits = 50
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            try:
+                max_hits = int(args[i + 1])
+            except ValueError:
+                return make_result(False, "grep", error={"code": "USAGE", "message": "Max debe ser numero", "hint": "Usa --max N con N entero"})
+    data = backend.grep(pattern, path, regex=regex, case_insensitive=case_insensitive, max_hits=max_hits)
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "grep", data=data)
+    return make_result(False, "grep", error=data)
+
+
+def handle_scaffold(backend: FTPBackend, args: list[str]) -> Result:
+    if len(args) < 2:
+        return make_result(False, "scaffold", error={"code": "USAGE", "message": "Usage: mudctl scaffold <ejemplo> <destino-nuevo> [--dry-run] [--yes]", "hint": "Copia un ejemplo ajeno a una ruta nueva tuya sin pisar nada."})
+    source = args[0]
+    destination = args[1]
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
+    data = backend.scaffold(source, destination, dry_run=dry_run)
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "scaffold", data=data)
+    return make_result(False, "scaffold", error=data)

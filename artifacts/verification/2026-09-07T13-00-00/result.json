@@ -1,0 +1,1 @@
+{"command": "uv run pytest -q + CLI guard/json","criterion": "18 tests en verde, guarda aborta con 6, json valido, recursivo/cp/grep/scaffold ok en falso local","exit_code": 0,"stderr_tail": "","stdout_tail": "18 passed in 0.04s; guard ABORTED 6; cp --json NETWORK por credencial muerta","verdict": "PASS"}
