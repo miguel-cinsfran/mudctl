@@ -1,0 +1,6 @@
+{
+    "name": "mudctl",
+    "version": "0.1.0",
+    "private": true,
+    "envs": [".env"]
+}
