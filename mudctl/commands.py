@@ -9,7 +9,10 @@ from mudctl.output import Result, OutputFormatter, ExitCode, make_result, make_e
 
 
 def run(backend: FTPBackend, argv: list[str] | None = None) -> int:
+    from mudctl.output import OutputFormat
     args = argv if argv is not None else sys.argv[1:]
+    json_mode = "--json" in args
+    args = [a for a in args if a != "--json"]
     if not args:
         print(backend.describe())
         return ExitCode.OK.value
@@ -51,6 +54,9 @@ def run(backend: FTPBackend, argv: list[str] | None = None) -> int:
     elif isinstance(result, str):
         result = make_result(True, verb, data={"output": result})
 
+    if json_mode and isinstance(result, Result):
+        from mudctl.output import OutputFormat as _Fmt
+        result.format = _Fmt.JSON
     print(OutputFormatter.format(result))
     return OutputFormatter.exit_code(result)
 
@@ -63,12 +69,15 @@ def handle_doctor(backend: FTPBackend) -> Result:
 
 
 def handle_list(backend: FTPBackend, args: list[str]) -> Result:
-    path = args[0] if args else "/"
+    path = args[0] if args and not args[0].startswith("--") else "/"
     recursive = "--recursive" in args
     depth = None
     for i, a in enumerate(args):
         if a == "--depth" and i + 1 < len(args):
-            depth = int(args[i + 1])
+            try:
+                depth = int(args[i + 1])
+            except ValueError:
+                return make_result(False, "list", error={"code": "USAGE", "message": "Depth debe ser numero", "hint": "Usa --depth N con N entero"})
     data = backend.list(path, recursive=recursive, depth=depth)
     return make_result(True, "list", data=data)
 
@@ -89,12 +98,17 @@ def handle_put(backend: FTPBackend, args: list[str]) -> Result:
         return make_result(False, "put", error={"code": "USAGE", "message": "Usage: mudctl put <local_path> <remote_path> [--dry-run] [--yes] [--expect N]", "hint": "Provide local and remote paths."})
     local_path = args[0]
     remote_path = args[1]
-    dry_run = "--dry-run" in args
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
     yes = "--yes" in args
     expect = None
     for i, a in enumerate(args):
         if a == "--expect" and i + 1 < len(args):
-            expect = int(args[i + 1])
+            try:
+                expect = int(args[i + 1])
+            except ValueError:
+                return make_result(False, "put", error={"code": "USAGE", "message": "Expect debe ser numero", "hint": "Usa --expect N con N entero"})
+    if expect is not None and expect != 1:
+        return make_result(False, "put", error={"code": "ABORTED", "message": f"Expect {expect} no coincide con 1", "hint": "Revisa --expect"})
     data = backend.put(local_path, remote_path, dry_run=dry_run)
     if "status" in data and data["status"] == "ok":
         return make_result(True, "put", data=data)
@@ -139,15 +153,21 @@ def handle_rm(backend: FTPBackend, args: list[str]) -> Result:
         return make_result(False, "rm", error={"code": "USAGE", "message": "Usage: mudctl rm <path> [--recursive] [--dry-run] [--yes] [--expect N] [--max N]", "hint": "Provide at least the path."})
     path = args[0]
     recursive = "--recursive" in args
-    dry_run = "--dry-run" in args
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
     yes = "--yes" in args
     expect = None
     max_files = None
     for i, a in enumerate(args):
         if a == "--expect" and i + 1 < len(args):
-            expect = int(args[i + 1])
+            try:
+                expect = int(args[i + 1])
+            except ValueError:
+                return make_result(False, "rm", error={"code": "USAGE", "message": "Expect debe ser numero", "hint": "Usa --expect N con N entero"})
         if a == "--max" and i + 1 < len(args):
-            max_files = int(args[i + 1])
+            try:
+                max_files = int(args[i + 1])
+            except ValueError:
+                return make_result(False, "rm", error={"code": "USAGE", "message": "Max debe ser numero", "hint": "Usa --max N con N entero"})
     data = backend.rm(path, recursive=recursive, dry_run=dry_run, expect=expect, max_files=max_files)
     if "status" in data and data["status"] == "ok":
         return make_result(True, "rm", data=data)

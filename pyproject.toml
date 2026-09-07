@@ -17,9 +17,6 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
-[tool.uv]
-dev-dependencies = ["pytest>=8.0"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-v"]

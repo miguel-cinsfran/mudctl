@@ -145,7 +145,7 @@ class FTPClientBackend(FTPBackend):
 
     def put(self, local_path: str, remote_path: str, dry_run: bool = True) -> dict:
         if dry_run:
-            return {"action": "dry-run", "local": local_path, "remote": remote_path, "message": f"Se subira: {local_path} -> {remote_path}"}
+            return {"status": "ok", "action": "dry-run", "local": local_path, "remote": remote_path, "message": f"Se subira: {local_path} -> {remote_path}"}
         try:
             self._ensure_connected()
             with open(local_path, "rb") as f:
@@ -163,8 +163,8 @@ class FTPClientBackend(FTPBackend):
             self._ftp.retrbinary(f"RETR {remote_path}", remote_file.write)
             remote_size = len(remote_file.getvalue())
             if local_size == remote_size:
-                return {"local": local_path, "remote": remote_path, "match": True, "message": "Sin diferencias"}
-            return {"local": local_path, "remote": remote_path, "match": False, "local_size": local_size, "remote_size": remote_size}
+                return {"status": "ok", "local": local_path, "remote": remote_path, "match": True, "message": "Sin diferencias"}
+            return {"status": "ok", "local": local_path, "remote": remote_path, "match": False, "local_size": local_size, "remote_size": remote_size}
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
 
@@ -173,7 +173,14 @@ class FTPClientBackend(FTPBackend):
             self._ensure_connected()
             files = []
             self._ftp.retrlines(f"LIST {path}", files.append)
-            return [{"raw": f} for f in files if pattern.lower() in f.lower()]
+            if regex:
+                import re
+                flags = re.IGNORECASE if case_insensitive else 0
+                rx = re.compile(pattern, flags)
+                return [{"raw": f} for f in files if rx.search(f)]
+            if case_insensitive:
+                return [{"raw": f} for f in files if pattern.lower() in f.lower()]
+            return [{"raw": f} for f in files if pattern in f]
         except Exception as e:
             return []
 
@@ -186,11 +193,16 @@ class FTPClientBackend(FTPBackend):
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
 
     def rm(self, path: str, recursive: bool = False, dry_run: bool = True, expect: int | None = None, max_files: int | None = None) -> dict:
+        count = 1
+        if expect is not None and expect != count:
+            return {"status": "error", "code": "ABORTED", "message": f"Expect {expect} no coincide con {count}", "hint": "Revisa --expect"}
+        if max_files is not None and count > max_files:
+            return {"status": "error", "code": "ABORTED", "message": f"Supera --max {max_files}", "hint": "Sube --max o reduce el alcance"}
         if dry_run:
             msg = f"Se borraria: {path}"
             if recursive:
                 msg += " (recursivo)"
-            return {"action": "dry-run", "path": path, "recursive": recursive, "message": msg}
+            return {"status": "ok", "action": "dry-run", "path": path, "recursive": recursive, "message": msg}
         try:
             self._ensure_connected()
             if recursive:
@@ -215,20 +227,15 @@ class FTPClientBackend(FTPBackend):
     def info(self, path: str) -> dict:
         try:
             self._ensure_connected()
-            import io
-            data = io.BytesIO()
-            self._ftp.retrbinary(f"SIZE {path}", data.write)
-            return {"path": path, "size": len(data.getvalue()), "status": "ok"}
+            size = self._ftp.size(path)
+            return {"path": path, "size": size, "status": "ok"}
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
 
     def move(self, source: str, destination: str) -> dict:
         try:
             self._ensure_connected()
-            import io
-            data = io.BytesIO()
-            self._ftp.retrbinary(f"RETR {source}", data.write)
-            self._ftp.storbinary(f"STOR {destination}", io.BytesIO(data.getvalue()))
+            self._ftp.rename(source, destination)
             return {"source": source, "destination": destination, "moved": True, "status": "ok"}
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}

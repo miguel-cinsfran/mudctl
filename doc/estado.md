@@ -1,31 +1,34 @@
 # mudctl — Estado del Proyecto
 
-## Estado actual: PROPOSE v1 — Tarjeta kanban creada y bloqueada en Gate A
+Fecha: 2026-09-07, revisión Lorena directa (sin arnés).
 
-### Fecha: 2026-09-07
+## Estado actual
+Implementado v0.1.0 local, 6 commits en master, repo público miguel-cinsfran/mudctl. Cambios locales sin push pendientes de OK de Miguel.
 
-### Resumen
-- Tarjeta kanban **t_3c3a3632** creada en el board, assignee a coding.
-- Bloqueada en Gate A: protocolo del puerto 3008 pendiente de confirmar.
-- Repo creado en `C:/Users/ic_ma/Documents/Desarrollo/GitHub/mudctl/`.
-- Archivos existentes: `AGENTS.md`, `SPEC.md`, `doc/investigacion.md`, `doc/estado.md`, `.gitignore`, `.env.example`.
+## Qué funciona (verificado por ejecución 2026-09-07)
+- 12 tests pytest pasan en 0.02s (test_core 5 + test_utils 7).
+- put y rm en dry-run devuelven ok con exit 0. Antes devolvían ERROR UNKNOWN con exit 7.
+- put y rm ahora son dry-run por defecto. Solo ejecutan real con --yes.
+- --json funciona en todos los verbos. Antes se ignoraba.
+- --expect y --max con exit 6 ABORTED si no coincide. USAGE exit 2.
+- info usa FTP SIZE real. move usa rename real. search soporta --regex y --case-insensitive.
+- diff devuelve status ok con match por tamaño.
 
-### Qué falta
-1. **Confirmar protocolo** (puerto 3008): ¿FTP, FTPS o SFTP? Pendiente de consulta.
-2. **Luna Gate A**: revisión del contrato.
-3. **Diseño (Gate A2)**: si aplica.
-4. **Implementación**: Lorena desarrolla el CLI.
-5. **Tests**: pytest.
-6. **Instalación**: `uv pip install -e .`.
+## Qué falta / límites honestos
+- Sin prueba real contra reinosdeleyenda.es:3008. MUD_PASSWORD vacía en .env, doctor daría AUTH. Falta confirmar con Mordisko si el acceso hazrakh sigue vivo.
+- Protocolo: solo ftp con ftplib. SPEC menciona ftps/sftp pero no implementado. Puerto 3008 atípico para FTP, pendiente confirmar.
+- diff solo compara tamaño, no contenido. Vale para v0.1, no para edición fina.
+- Tests solo cubren output y utils. Sin tests con FTP falso para los verbos. Los 12 que pasan no prueban red.
+- doc/api.md e investigacion.md sin actualizar a los fixes. SPEC lista 9 archivos de test que no existen.
+- __pycache__ estaba commiteado, se sacó del índice. Falta commit.
 
-### Qué funciona
-- Repo inicializado con estructura de proyecto.
-- AGENTS.md con reglas de diseño y seguridad.
-- SPEC.md con especificación técnica completa.
-- .env.example con variables de entorno.
-- .gitignore para proteger credenciales.
-- doc/investigacion.md con notas sobre el protocolo.
-- Tarjeta kanban con contrato PROPOSE completo.
+## Archivos tocados en esta revisión
+- mudctl/backend.py: status ok en dry-run, expect/max en rm, info por size, move por rename, search regex, diff con status.
+- mudctl/commands.py: --json global, dry-run por defecto, parse seguro de --expect/--max/--depth.
+- pyproject.toml: quitado bloque deprecated tool.uv.dev-dependencies.
+- Untraked de __pycache__ del índice.
 
-### Cambios pendientes en doc/estado.md
-Este archivo se actualizará al completar cada fase.
+## Siguiente
+1. Confirmar credencial con Mordisko.
+2. Probar doctor + list real.
+3. Si OK, commit + push solo con OK explícito de Miguel.
