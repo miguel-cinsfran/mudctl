@@ -23,6 +23,7 @@ Implementado v0.1.0 local, 6 commits en master, repo público miguel-cinsfran/mu
 - Lectura real OK: list / trae el árbol (baseobs, cmds, players...), list /doc trae hijos, cat /doc/AGRADECIMIENTOS trae contenido.
 - Home real confirmado por Miguel: MUD_HOME=/w/hazrakh (.env actualizado). Guarda verificada contra servidor: rm fuera del home aborta exit 6, rm dentro en dry-run ok sin tocar nada. /d trae ~30 reinos, /w ~30 dirs de inmos (pocos activos).
 - Primera escritura real OK 2026-09-07: put de fichero de prueba a /w/hazrakh (dry-run + --yes --expect 1), cat devolvió contenido idéntico, rm --yes lo borró y list confirmó que ya no está. Ciclo completo verificado.
+- Batería real completa en /w/hazrakh/mudctl-bateria (creada, verificada, borrada, home limpio): put --recursive, cp, scaffold (nuevo OK + existente aborta 6), apply, plan --yes, move, status, search, tail error-log, grep acotado (5/5 hits), watch (detectó los 5 borrados), rm --recursive --expect. Bug cazado: plan --yes dejaba mkdir/move en dry-run (fix + test regresión, 29 tests).
 - grep sobre árboles grandes por FTPS es lento (cada fichero abre conexión+TLS): timed out a 180s en /doc. Para búsquedas grandes, acotar ruta o pedir índice.
 - Protocolo: solo ftp con ftplib. SPEC menciona ftps/sftp pero no implementado. Puerto 3008 atípico para FTP, pendiente confirmar.
 - diff solo compara tamaño, no contenido. Vale para v0.1, no para edición fina.
