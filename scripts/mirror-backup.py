@@ -1,173 +1,185 @@
 #!/usr/bin/env python3
-"""mirror-backup.py — Backup del home FTP con rotación de 3 días.
+"""Backup fresco del home FTP con rotación de N días.
 
-Usa mudctl get --recursive para bajar el home del servidor, lo guarda en
-un espejo local, y luego crea un backup con marca de fecha. Los backups
-más viejos de 3 días se borran.
+El script no depende de un LLM ni de un espejo previo:
+1. descarga el home remoto a un staging nuevo;
+2. exige que la descarga produzca archivos;
+3. mueve el staging a una carpeta fechada;
+4. borra únicamente backups fechados más viejos de N días.
 
-Sin LLM, sin magia: solo Python estándar + subprocess.
+Si falla la descarga, no borra backups existentes.
 
 Uso:
-    python scripts/mirror-backup.py              # backup normal
-    python scripts/mirror-backup.py --dry-run    # listaría qué haría
-    python scripts/mirror-backup.py --keep N     # guardar N días en vez de 3
+    python scripts/mirror-backup.py
+    python scripts/mirror-backup.py --dry-run
+    python scripts/mirror-backup.py --keep 3
 """
+
+from __future__ import annotations
 
 import argparse
 import datetime
 import os
-import subprocess
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-# Configuración
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
-REPO_DIR = SCRIPT_DIR
+REPO_DIR = Path(__file__).resolve().parent.parent
 BACKUP_ROOT = Path(os.environ.get("MUD_BACKUP_ROOT", str(REPO_DIR / "backups")))
-MIRROR_PATH = Path(os.environ.get("MUD_MIRROR_PATH", str(Path.home() / "AppData" / "Local" / "Temp" / "mudctl-bateria2")))
+REMOTE_HOME = os.environ.get("MUD_BACKUP_REMOTE", "/w/hazrakh")
 DAYS_TO_KEEP = 3
+LOCK_PATH = BACKUP_ROOT / ".mirror-backup.lock"
 
 
-def run_mudctl(args: list[str], timeout: int = 600) -> tuple[int, str, str]:
-    """Ejecuta mudctl y retorna (exit_code, stdout, stderr)."""
-    cmd = [sys.executable, "-m", "mudctl"] + args
+def python_runner() -> str:
+    """Devuelve el Python del entorno del repo cuando existe."""
+    candidates = [
+        REPO_DIR / ".venv" / "Scripts" / "python.exe",
+        REPO_DIR / ".venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+def acquire_lock() -> bool:
+    """Adquiere un lock sin esperar; evita dos backups simultáneos."""
+    BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"pid={os.getpid()}\n")
+        return True
+    except FileExistsError:
+        return False
+
+
+def release_lock() -> None:
+    try:
+        LOCK_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def run_mudctl(destination: Path, timeout: int = 900) -> tuple[int, str, str]:
+    """Descarga el home remoto al destino y devuelve código/salidas."""
+    command = [
+        python_runner(), "-m", "mudctl", "get", REMOTE_HOME,
+        str(destination), "--recursive",
+    ]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     try:
-        proc = subprocess.run(
-            cmd,
+        result = subprocess.run(
+            command,
+            cwd=str(REPO_DIR),
+            env=env,
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=str(REPO_DIR),
-            env=env,
+            check=False,
         )
-        return proc.returncode, proc.stdout, proc.stderr
+        return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
-        return -1, "", "Timeout excedido"
-    except Exception as e:
-        return -1, "", str(e)
+        return 124, "", "timeout de descarga excedido"
+    except OSError as exc:
+        return 127, "", f"no se pudo ejecutar mudctl: {type(exc).__name__}"
 
 
-def get_mirror_date() -> str:
-    """Fecha actual en formato YYYY-MM-DD."""
-    return datetime.date.today().isoformat()
+def count_files(path: Path) -> int:
+    return sum(1 for item in path.rglob("*") if item.is_file())
 
 
-def ensure_mirror_exists() -> bool:
-    """Asegura que el espejo local exista con contenido."""
-    if MIRROR_PATH.exists() and any(MIRROR_PATH.iterdir()):
-        return True
-
-    print(f"[INFO] El espejo no existe o está vacío: {MIRROR_PATH}")
-    print(f"[INFO] Bajando el home del servidor con mudctl get...")
-    print(f"[INFO] Si el espejo se creó previamente, usa ese directorio.")
-    print(f"[INFO] Si el espejo está vacío, ejecuta manualmente:")
-    print(f"      mudctl get /w/hazrakh {MIRROR_PATH} --recursive --yes")
-
-    MIRROR_PATH.mkdir(parents=True, exist_ok=True)
-    rc, out, err = run_mudctl([
-        "get", "/w/hazrakh", str(MIRROR_PATH),
-        "--recursive", "--yes",
-    ])
-    if rc != 0:
-        print(f"[ERROR] Fallo al bajar el espejo: {err}")
-        # Verificar si el espejo tiene algo aunque el exit no sea 0
-        if MIRROR_PATH.exists() and any(MIRROR_PATH.iterdir()):
-            print(f"[WARN] El espejo tiene contenido aunque haya error. Continuando.")
-            return True
-        return False
-
-    print(f"[OK] Espejo creado en: {MIRROR_PATH}")
-    return True
+def dated_destination(date_str: str) -> Path:
+    """Busca una carpeta fechada libre sin sobrescribir un backup."""
+    candidate = BACKUP_ROOT / date_str
+    suffix = 2
+    while candidate.exists():
+        candidate = BACKUP_ROOT / f"{date_str}-{suffix}"
+        suffix += 1
+    return candidate
 
 
-def create_backup(date_str: str, dry_run: bool = False) -> bool:
-    """Crea un backup del espejo local en un directorio con marca de fecha."""
-    date_dir = BACKUP_ROOT / date_str
-    if date_dir.exists():
-        print(f"[INFO] El directorio {date_dir} ya existe, reutilizando.")
-        return True
-
-    if dry_run:
-        print(f"[DRY-RUN] Crearía: {date_dir}")
-        return True
-
-    try:
-        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(MIRROR_PATH, date_dir)
-        print(f"[OK] Backup creado: {date_dir}")
-        return True
-    except Exception as e:
-        print(f"[ERROR] Fallo al crear backup: {e}")
-        return False
-
-
-def cleanup_old_backups(days: int, dry_run: bool = False) -> int:
-    """Borra backups más viejos de N días. Retorna cantidad borrada."""
-    cutoff = datetime.date.today() - datetime.timedelta(days=days)
-    borrados = 0
-
+def rotate_backups(keep: int, today: datetime.date, dry_run: bool) -> int:
+    """Elimina solo carpetas fechadas que superen la retención."""
+    cutoff = today - datetime.timedelta(days=keep)
+    removed = 0
     if not BACKUP_ROOT.exists():
-        return 0
+        return removed
 
     for entry in BACKUP_ROOT.iterdir():
-        if not entry.is_dir():
+        if not entry.is_dir() or entry.name.startswith("."):
             continue
+        date_text = entry.name[:10]
         try:
-            entry_date = datetime.date.fromisoformat(entry.name)
-            if entry_date < cutoff:
-                if dry_run:
-                    print(f"[DRY-RUN] Borraría: {entry}")
-                else:
-                    shutil.rmtree(entry)
-                    print(f"[OK] Borrado: {entry}")
-                borrados += 1
+            entry_date = datetime.date.fromisoformat(date_text)
         except ValueError:
             continue
+        if entry_date < cutoff:
+            if dry_run:
+                print(f"[DRY-RUN] Borraría: {entry}")
+            else:
+                shutil.rmtree(entry)
+                print(f"[OK] Borrado: {entry}")
+            removed += 1
+    return removed
 
-    return borrados
 
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Backup del home FTP con rotación de 3 días"
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Lista las operaciones sin ejecutar nada"
-    )
-    parser.add_argument(
-        "--keep", type=int, default=DAYS_TO_KEEP,
-        help=f"Días a conservar (default: {DAYS_TO_KEEP})"
-    )
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Backup fresco del home FTP")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--keep", type=int, default=DAYS_TO_KEEP)
     args = parser.parse_args()
 
-    date_str = get_mirror_date()
+    if args.keep < 1:
+        print("[ERROR] --keep debe ser al menos 1 día")
+        return 2
 
-    print(f"=== mirror-backup {date_str} ===")
-    print(f"Espejo: {MIRROR_PATH}")
-    print(f"Backup root: {BACKUP_ROOT}")
-    print(f"Retention: {args.keep} días")
-    print()
+    today = datetime.date.today()
+    date_text = today.isoformat()
+    print(f"=== mirror-backup {date_text} ===")
+    print(f"Remoto: {REMOTE_HOME}")
+    print(f"Destino: {BACKUP_ROOT}")
+    print(f"Retención: {args.keep} días")
 
-    # Paso 0: Asegurar que el espejo existe
-    if not ensure_mirror_exists():
-        print("[FATAL] No se pudo preparar el espejo. Abortando.")
-        sys.exit(1)
+    if args.dry_run:
+        print(f"[DRY-RUN] Descargaría un staging fresco y crearía {BACKUP_ROOT / date_text}")
+        rotate_backups(args.keep, today, dry_run=True)
+        return 0
 
-    # Paso 1: Crear backup del espejo actual
-    if not create_backup(date_str, args.dry_run):
-        print("[FATAL] No se pudo crear el backup. Abortando.")
-        sys.exit(1)
+    if not acquire_lock():
+        print(f"[ERROR] Ya hay otro backup en ejecución: {LOCK_PATH}")
+        return 6
 
-    # Paso 2: Limpiar backups viejos
-    borrados = cleanup_old_backups(args.keep, args.dry_run)
-    print()
-    print(f"[RESUMEN] Backup {date_str} creado, {borrados} backups viejos borrados.")
-    print("[DONE]")
+    staging: Path | None = None
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=".mirror-staging-", dir=str(BACKUP_ROOT)))
+        print(f"[INFO] Descargando a staging nuevo...")
+        code, _stdout, stderr = run_mudctl(staging)
+        files = count_files(staging)
+        if code != 0 or files == 0:
+            detail = stderr.strip() or f"mudctl terminó con código {code}"
+            print(f"[ERROR] Descarga incompleta: {detail}")
+            print("[INFO] No se modificaron ni rotaron backups existentes.")
+            return 1
+
+        destination = dated_destination(date_text)
+        staging.rename(destination)
+        staging = None
+        print(f"[OK] Backup creado: {destination}")
+        print(f"[OK] Archivos descargados: {files}")
+
+        removed = rotate_backups(args.keep, today, dry_run=False)
+        print(f"[RESUMEN] Backup válido; {removed} backups viejos borrados.")
+        return 0
+    finally:
+        if staging is not None and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        release_lock()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

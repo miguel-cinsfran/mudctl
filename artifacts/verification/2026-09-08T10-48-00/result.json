@@ -1,0 +1,8 @@
+{
+  "command": "uv run python scripts/mirror-backup.py --keep 3",
+  "exit_code": 0,
+  "stdout_tail": "[OK] Backup creado: .../backups/2026-09-08-2; [OK] Archivos descargados: 113; [RESUMEN] Backup válido; 0 backups viejos borrados.",
+  "stderr_tail": "",
+  "criterion": "descarga fresca válida, lock/staging limpiados y rotación conservadora",
+  "verdict": "PASS"
+}
