@@ -658,36 +658,40 @@ class FTPClientBackend(FTPBackend):
 
 # ---- Sync: manifiesto, locks, y paralelismo ----
 
-    def _manifest_path(self) -> str:
-        home = Path(self._home)
-        if not home.exists():
-            return str(Path.cwd() / ".mudctl-sync.json")
-        return str(home / ".mudctl-sync.json")
+    def _manifest_path(self, local_root: str | None = None) -> str:
+        base = Path(local_root) if local_root else Path.cwd()
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            base = Path.cwd()
+        return str(base / ".mudctl-sync.json")
 
-    def _lock_path(self) -> str:
-        home = Path(self._home)
-        if not home.exists():
-            return str(Path.cwd() / ".mudctl-sync.lock")
-        return str(home / ".mudctl-sync.lock")
+    def _lock_path(self, local_root: str | None = None) -> str:
+        base = Path(local_root) if local_root else Path.cwd()
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            base = Path.cwd()
+        return str(base / ".mudctl-sync.lock")
 
-    def _manifest_load(self) -> dict:
+    def _manifest_load(self, local_root: str | None = None) -> dict:
         import json
-        p = self._manifest_path()
+        p = self._manifest_path(local_root)
         try:
             return json.loads(Path(p).read_text(encoding="utf-8"))
         except Exception:
             return {"remote": self._home, "files": {}, "updated": "", "last_run": {}}
 
-    def _manifest_save(self, manifest: dict) -> None:
+    def _manifest_save(self, manifest: dict, local_root: str | None = None) -> None:
         import json, os as _os
-        p = self._manifest_path()
+        p = self._manifest_path(local_root)
         tmp = p + ".tmp"
         Path(tmp).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         _os.replace(tmp, p)
 
-    def _lock_acquire(self) -> bool:
+    def _lock_acquire(self, local_root: str | None = None) -> bool:
         import os
-        p = self._lock_path()
+        p = self._lock_path(local_root)
         if Path(p).exists():
             try:
                 pid = int(Path(p).read_text(encoding="utf-8").strip())
@@ -698,9 +702,9 @@ class FTPClientBackend(FTPBackend):
         Path(p).write_text(str(os.getpid()), encoding="utf-8")
         return True
 
-    def _lock_release(self) -> None:
+    def _lock_release(self, local_root: str | None = None) -> None:
         import os
-        p = self._lock_path()
+        p = self._lock_path(local_root)
         try:
             if Path(p).exists() and int(Path(p).read_text(encoding="utf-8").strip()) == os.getpid():
                 Path(p).unlink()
@@ -731,10 +735,11 @@ class FTPClientBackend(FTPBackend):
         return lines
 
     def _parse_manifest_list(self, path: str) -> dict[str, dict]:
+        """Parsea LIST y devuelve {name: {size, mtime, type}} solo para ficheros."""
         result: dict[str, dict] = {}
         for line in self._list_lines(path):
             parsed = self._parse_list_line(line)
-            if parsed:
+            if parsed and parsed["type"] != "dir":
                 result[parsed["name"]] = {"size": parsed["size"], "mtime": parsed["mtime"], "type": parsed["type"]}
         return result
 
@@ -742,7 +747,7 @@ class FTPClientBackend(FTPBackend):
         try:
             self._ensure_connected()
             base = self._norm(remote_path)
-            manifest = self._manifest_load()
+            manifest = self._manifest_load(local_path)
             remote_files = self._parse_manifest_list(base)
             if not manifest.get("files"):
                 return {"status": "ok", "local": local_path, "remote": base, "new": list(remote_files.keys()), "changed": [], "gone": [], "message": "Manifiesto vacío: inicializar con sync pull"}
@@ -773,17 +778,17 @@ class FTPClientBackend(FTPBackend):
     def sync_pull(self, remote_path: str, local_path: str, dry_run: bool = True, parallel: int = 4, expect: int | None = None, prune: bool = False, yes: bool = False) -> dict:
         import json
         import time
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from datetime import datetime, timezone
         if not dry_run and not yes:
             return {"status": "error", "code": "USAGE", "message": "sync pull necesita --yes para escribir", "hint": "Usa --dry-run para ver qué bajaría"}
-        if not self._lock_acquire():
+        if not self._lock_acquire(local_path):
             return {"status": "error", "code": "ABORTED", "message": "Otro sync está activo", "hint": "Espera o mata el proceso lock"}
         try:
             self._ensure_connected()
             base = self._norm(remote_path)
             dest = Path(local_path)
-            manifest = self._manifest_load()
+            manifest = self._manifest_load(local_path)
             remote_files = self._parse_manifest_list(base)
             old_files = manifest.get("files", {})
             new, changed, same, gone = [], [], [], []
@@ -804,24 +809,19 @@ class FTPClientBackend(FTPBackend):
             if dry_run:
                 return {"status": "ok", "action": "dry-run", "remote": base, "local": str(dest), "new": len(new), "changed": len(changed), "same": len(same), "gone": len(gone), "to_download": len(to_download), "message": f"Dry-run: {len(to_download)} ficheros a bajar"}
             count = 0; bytes_total = 0
-            with ThreadPoolExecutor(max_workers=min(parallel, 8)) as pool:
-                futures = {}
-                for name in to_download:
-                    info = remote_files[name]
-                    rpath = f"{base}/{name}" if base != "/" else f"/{name}"
-                    lpath = dest / name
-                    lpath.parent.mkdir(parents=True, exist_ok=True)
-                    futures[pool.submit(self._ftp.retrbinary, f"RETR {rpath}", lpath)] = name
-                for future in futures:
-                    name = futures[future]
-                    try:
-                        future.result()
-                        count += 1
-                    except Exception as e:
-                        return {"status": "error", "code": "NETWORK", "message": f"Falló {name}: {e}", "hint": "Verifica conexión"}
+            # Descarga secuencial con RETR binary para compatibilidad vsFTPd
             for name in to_download:
                 info = remote_files[name]
                 rpath = f"{base}/{name}" if base != "/" else f"/{name}"
+                lpath = dest / name
+                lpath.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    self._ftp.retrbinary(f"RETR {rpath}", open(str(lpath), "wb").write)
+                    count += 1
+                except Exception as e:
+                    return {"status": "error", "code": "NETWORK", "message": f"Falló {name}: {e}", "hint": "Verifica conexión"}
+            for name in to_download:
+                info = remote_files[name]
                 lpath = dest / name
                 if lpath.is_file() and lpath.stat().st_size != info["size"]:
                     return {"status": "error", "code": "ABORTED", "message": f"SIZE mismatch en {name}", "hint": "El fichero descargado no coincide"}
@@ -832,25 +832,25 @@ class FTPClientBackend(FTPBackend):
                     if lpath.is_file():
                         lpath.unlink()
             new_manifest = {"remote": base, "files": {n: {"size": remote_files[n]["size"], "mtime": remote_files[n]["mtime"]} for n in remote_files}, "updated": datetime.now(timezone.utc).isoformat(), "last_run": {"verb": "pull", "counts": {"new": len(new), "changed": len(changed), "same": len(same), "gone": len(gone)}}}
-            self._manifest_save(new_manifest)
+            self._manifest_save(new_manifest, local_path)
             return {"status": "ok", "action": "pulled", "remote": base, "local": str(dest), "files": count, "bytes": bytes_total, "new": len(new), "changed": len(changed), "same": len(same), "gone": len(gone)}
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
         finally:
-            self._lock_release()
+            self._lock_release(local_path)
 
     def sync_push(self, local_path: str, remote_path: str, dry_run: bool = True, expect: int | None = None, yes: bool = False) -> dict:
         import json
         from datetime import datetime, timezone
         if not dry_run and not yes:
             return {"status": "error", "code": "USAGE", "message": "sync push necesita --yes para escribir", "hint": "Usa --dry-run para ver qué subiría"}
-        if not self._lock_acquire():
+        if not self._lock_acquire(local_path):
             return {"status": "error", "code": "ABORTED", "message": "Otro sync está activo", "hint": "Espera o mata el proceso lock"}
         try:
             self._ensure_connected()
             base = self._norm(remote_path)
             dest = Path(local_path)
-            manifest = self._manifest_load()
+            manifest = self._manifest_load(local_path)
             remote_files = self._parse_manifest_list(base)
             old_files = manifest.get("files", {})
             local_map: dict[str, Path] = {}
@@ -888,12 +888,12 @@ class FTPClientBackend(FTPBackend):
                 lp = local_map[name]
                 old_files[name] = {"size": lp.stat().st_size, "mtime": datetime.now(timezone.utc).isoformat()}
             new_manifest = {"remote": base, "files": old_files, "updated": datetime.now(timezone.utc).isoformat(), "last_run": {"verb": "push", "counts": {"uploaded": count}}}
-            self._manifest_save(new_manifest)
+            self._manifest_save(new_manifest, local_path)
             return {"status": "ok", "action": "pushed", "local": str(dest), "remote": base, "files": count, "bytes": bytes_total, "conflicts": sorted(conflict)}
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
         finally:
-            self._lock_release()
+            self._lock_release(local_path)
 
     @staticmethod
     def _apply_unified(original: str, patch_text: str) -> str:

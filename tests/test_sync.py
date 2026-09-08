@@ -173,33 +173,37 @@ def test_lock_exclusive(tmp_path):
     # El backend creará un lock con PID y detectará ocupado
 
 
-def test_sync_status_with_manifest():
+def test_sync_status_with_manifest(tmp_path):
     b = make_backend_sync()
     m = SyncManifest()
     m.files = {"a.c": {"size": 400, "mtime": "Jan 01  2020"}}
-    b._manifest_save(m.to_dict())
-    r = b.sync_status("/tmp/sync_test", "/hazrakh")
+    b._manifest_save(m.to_dict(), str(tmp_path))
+    r = b.sync_status(str(tmp_path), "/hazrakh")
     assert r["status"] == "ok"
     assert "new" in r and "changed" in r and "gone" in r and "same" in r
 
 
-def test_sync_pull_dry_run():
+def test_sync_pull_dry_run(tmp_path):
     b = make_backend_sync()
     b._ftp.files["/hazrakh/test.c"] = b"content"
-    r = b.sync_pull("/hazrakh", "/tmp/sync_out", dry_run=True)
+    r = b.sync_pull("/hazrakh", str(tmp_path), dry_run=True)
     assert r["status"] == "ok"
     assert r["action"] == "dry-run"
     assert r["to_download"] >= 0
 
 
-def test_sync_push_without_manifest():
+def test_sync_push_without_manifest(tmp_path):
     b = make_backend_sync()
-    import tempfile, os
-    with tempfile.TemporaryDirectory() as td:
-        # Manifiesto con archivos pero local vacío → 0 subidos
-        b._manifest_save({"remote": "/hazrakh", "files": {"a.c": {"size": 400, "mtime": "Jan 01  2020"}}, "updated": "", "last_run": {}})
-        r = b.sync_push(td, "/hazrakh", dry_run=True)
-        assert r["status"] == "ok"
+    # Manifiesto con archivos pero local vacío → 0 subidos
+    b._manifest_save({"remote": "/hazrakh", "files": {"a.c": {"size": 400, "mtime": "Jan 01  2020"}}, "updated": "", "last_run": {}}, str(tmp_path))
+    r = b.sync_push(str(tmp_path), "/hazrakh", dry_run=True)
+    assert r["status"] == "ok"
+
+
+def test_manifest_lives_in_mirror_root(tmp_path):
+    b = make_backend_sync()
+    b._manifest_save({"remote": "/hazrakh", "files": {}, "updated": "", "last_run": {}}, str(tmp_path))
+    assert (tmp_path / ".mudctl-sync.json").is_file()
 
 
 def test_sync_status_manifest_empty():

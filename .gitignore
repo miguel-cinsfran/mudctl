@@ -1,4 +1,8 @@
 .env
+.mudctl-sync.json
+.mudctl-sync.json.tmp
+.mudctl-sync.lock
+.mudctl-watch.json
 *.egg-info
 __pycache__
 *.pyc
