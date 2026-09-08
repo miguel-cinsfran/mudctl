@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """mirror-backup.py — Backup del home FTP con rotación de 3 días.
 
-Usa mudctl get --recursive para bajar el home del servidor y guarda una
-copia con marca de fecha. Los backups más viejos de 3 días se borran.
+Usa mudctl get --recursive para bajar el home del servidor, lo guarda en
+un espejo local, y luego crea un backup con marca de fecha. Los backups
+más viejos de 3 días se borran.
+
 Sin LLM, sin magia: solo Python estándar + subprocess.
 
 Uso:
     python scripts/mirror-backup.py              # backup normal
-    python scripts/mirror-backup.py --dry-run      # listaría qué haría
-    python scripts/mirror-backup.py --keep N       # guardar N días en vez de 3
+    python scripts/mirror-backup.py --dry-run    # listaría qué haría
+    python scripts/mirror-backup.py --keep N     # guardar N días en vez de 3
 """
 
 import argparse
@@ -23,18 +25,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 REPO_DIR = SCRIPT_DIR
 BACKUP_ROOT = Path(os.environ.get("MUD_BACKUP_ROOT", str(REPO_DIR / "backups")))
+MIRROR_PATH = Path(os.environ.get("MUD_MIRROR_PATH", str(Path.home() / "AppData" / "Local" / "Temp" / "mudctl-bateria2")))
 DAYS_TO_KEEP = 3
-MUDCTL = str(Path(os.environ.get("MUDCTL", str(REPO_DIR / ".venv" / "Scripts" / "python.exe"))))
-MUDCTL_MODULE = "mudctl"  # módulo a ejecutar con uv
-
-# Ruta al script que levanta el entorno del repo
-ENV_SCRIPT = REPO_DIR / "scripts" / "env_helper.py"
 
 
-def run_mudctl(args: list[str], timeout: int = 300) -> tuple[int, str, str]:
+def run_mudctl(args: list[str], timeout: int = 600) -> tuple[int, str, str]:
     """Ejecuta mudctl y retorna (exit_code, stdout, stderr)."""
     cmd = [sys.executable, "-m", "mudctl"] + args
-    # Agregar el directorio del repo al PYTHONPATH para que encuentre el módulo
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     try:
@@ -58,7 +55,35 @@ def get_mirror_date() -> str:
     return datetime.date.today().isoformat()
 
 
-def create_backup(mirror_path: Path, date_str: str, dry_run: bool = False) -> bool:
+def ensure_mirror_exists() -> bool:
+    """Asegura que el espejo local exista con contenido."""
+    if MIRROR_PATH.exists() and any(MIRROR_PATH.iterdir()):
+        return True
+
+    print(f"[INFO] El espejo no existe o está vacío: {MIRROR_PATH}")
+    print(f"[INFO] Bajando el home del servidor con mudctl get...")
+    print(f"[INFO] Si el espejo se creó previamente, usa ese directorio.")
+    print(f"[INFO] Si el espejo está vacío, ejecuta manualmente:")
+    print(f"      mudctl get /w/hazrakh {MIRROR_PATH} --recursive --yes")
+
+    MIRROR_PATH.mkdir(parents=True, exist_ok=True)
+    rc, out, err = run_mudctl([
+        "get", "/w/hazrakh", str(MIRROR_PATH),
+        "--recursive", "--yes",
+    ])
+    if rc != 0:
+        print(f"[ERROR] Fallo al bajar el espejo: {err}")
+        # Verificar si el espejo tiene algo aunque el exit no sea 0
+        if MIRROR_PATH.exists() and any(MIRROR_PATH.iterdir()):
+            print(f"[WARN] El espejo tiene contenido aunque haya error. Continuando.")
+            return True
+        return False
+
+    print(f"[OK] Espejo creado en: {MIRROR_PATH}")
+    return True
+
+
+def create_backup(date_str: str, dry_run: bool = False) -> bool:
     """Crea un backup del espejo local en un directorio con marca de fecha."""
     date_dir = BACKUP_ROOT / date_str
     if date_dir.exists():
@@ -71,8 +96,7 @@ def create_backup(mirror_path: Path, date_str: str, dry_run: bool = False) -> bo
 
     try:
         BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
-        # Copiar todo el contenido del espejo
-        shutil.copytree(mirror_path, date_dir)
+        shutil.copytree(MIRROR_PATH, date_dir)
         print(f"[OK] Backup creado: {date_dir}")
         return True
     except Exception as e:
@@ -101,7 +125,6 @@ def cleanup_old_backups(days: int, dry_run: bool = False) -> int:
                     print(f"[OK] Borrado: {entry}")
                 borrados += 1
         except ValueError:
-            # Nombre no es fecha, ignorar
             continue
 
     return borrados
@@ -119,25 +142,23 @@ def main():
         "--keep", type=int, default=DAYS_TO_KEEP,
         help=f"Días a conservar (default: {DAYS_TO_KEEP})"
     )
-    parser.add_argument(
-        "--mirror", type=str, default=None,
-        help="Ruta al espejo local (default: C:/Users/ic_ma/AppData/Local/Temp/mudctl-bateria2)"
-    )
     args = parser.parse_args()
 
-    mirror_path = Path(args.mirror) if args.mirror else Path(
-        "C:/Users/ic_ma/AppData/Local/Temp/mudctl-bateria2"
-    )
     date_str = get_mirror_date()
 
     print(f"=== mirror-backup {date_str} ===")
-    print(f"Espejo: {mirror_path}")
+    print(f"Espejo: {MIRROR_PATH}")
     print(f"Backup root: {BACKUP_ROOT}")
     print(f"Retention: {args.keep} días")
     print()
 
+    # Paso 0: Asegurar que el espejo existe
+    if not ensure_mirror_exists():
+        print("[FATAL] No se pudo preparar el espejo. Abortando.")
+        sys.exit(1)
+
     # Paso 1: Crear backup del espejo actual
-    if not create_backup(mirror_path, date_str, args.dry_run):
+    if not create_backup(date_str, args.dry_run):
         print("[FATAL] No se pudo crear el backup. Abortando.")
         sys.exit(1)
 
