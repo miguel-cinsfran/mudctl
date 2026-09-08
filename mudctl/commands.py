@@ -46,6 +46,7 @@ def run(backend: FTPBackend, argv: list[str] | None = None) -> int:
         "apply": lambda: handle_apply(backend, rest),
         "plan": lambda: handle_plan(backend, rest),
         "describe": lambda: make_result(True, "describe", data={"help": backend.describe()}),
+        "sync": lambda: handle_sync(backend, rest),
     }
 
     if verb not in dispatcher:
@@ -325,3 +326,62 @@ def handle_plan(backend: FTPBackend, args: list[str]) -> Result:
     if "status" in data and data["status"] == "ok":
         return make_result(True, "plan", data=data)
     return make_result(False, "plan", error=data)
+
+
+def handle_sync(backend: FTPBackend, args: list[str]) -> Result:
+    if not args:
+        return make_result(False, "sync", error={"code": "USAGE", "message": "Usage: mudctl sync <pull|push|status> <args> [--dry-run] [--yes] [--expect N] [--parallel N] [--prune]", "hint": "Sincroniza el espejo local con el remoto."})
+    sub = args[0].lower()
+    rest_args = args[1:]
+    if sub == "status":
+        if len(rest_args) < 2:
+            return make_result(False, "sync", error={"code": "USAGE", "message": "Usage: mudctl sync status <local_path> <remote_path>", "hint": "Compara local contra remoto usando manifiesto."})
+        data = backend.sync_status(rest_args[0], rest_args[1])
+    elif sub == "pull":
+        if not rest_args:
+            return make_result(False, "sync", error={"code": "USAGE", "message": "Usage: mudctl sync pull <remote_path> <local_path> [--dry-run] [--yes] [--expect N] [--parallel N] [--prune]", "hint": "Baja el espejo remoto a local."})
+        remote_p = rest_args[0]
+        local_p = rest_args[1] if len(rest_args) > 1 else "."
+        dry_run = "--dry-run" in rest_args[2:]
+        yes = "--yes" in rest_args[2:]
+        expect = None
+        parallel = 4
+        prune = False
+        i = 2
+        while i < len(rest_args):
+            if rest_args[i] == "--expect" and i + 1 < len(rest_args):
+                try: expect = int(rest_args[i+1])
+                except ValueError: pass
+                i += 2
+            elif rest_args[i] == "--parallel" and i + 1 < len(rest_args):
+                try: parallel = int(rest_args[i+1])
+                except ValueError: pass
+                i += 2
+            elif rest_args[i] == "--prune":
+                prune = True
+                i += 1
+            else:
+                i += 1
+        data = backend.sync_pull(remote_p, local_p, dry_run=dry_run, parallel=parallel, expect=expect, prune=prune, yes=yes)
+    elif sub == "push":
+        if len(rest_args) < 2:
+            return make_result(False, "sync", error={"code": "USAGE", "message": "Usage: mudctl sync push <local_path> <remote_path> [--dry-run] [--yes] [--expect N]", "hint": "Sube cambios locales al espejo remoto."})
+        local_p = rest_args[0]
+        remote_p = rest_args[1]
+        dry_run = "--dry-run" in rest_args[2:]
+        yes = "--yes" in rest_args[2:]
+        expect = None
+        i = 2
+        while i < len(rest_args):
+            if rest_args[i] == "--expect" and i + 1 < len(rest_args):
+                try: expect = int(rest_args[i+1])
+                except ValueError: pass
+                i += 2
+            else:
+                i += 1
+        data = backend.sync_push(local_p, remote_p, dry_run=dry_run, expect=expect, yes=yes)
+    else:
+        return make_result(False, "sync", error={"code": "USAGE", "message": f"Unknown sync subcommand '{sub}'. Use pull, push or status.", "hint": "Revisa mudctl describe"})
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "sync", data=data)
+    return make_result(False, "sync", error=data)

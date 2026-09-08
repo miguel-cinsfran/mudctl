@@ -656,6 +656,245 @@ class FTPClientBackend(FTPBackend):
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
 
+# ---- Sync: manifiesto, locks, y paralelismo ----
+
+    def _manifest_path(self) -> str:
+        home = Path(self._home)
+        if not home.exists():
+            return str(Path.cwd() / ".mudctl-sync.json")
+        return str(home / ".mudctl-sync.json")
+
+    def _lock_path(self) -> str:
+        home = Path(self._home)
+        if not home.exists():
+            return str(Path.cwd() / ".mudctl-sync.lock")
+        return str(home / ".mudctl-sync.lock")
+
+    def _manifest_load(self) -> dict:
+        import json
+        p = self._manifest_path()
+        try:
+            return json.loads(Path(p).read_text(encoding="utf-8"))
+        except Exception:
+            return {"remote": self._home, "files": {}, "updated": "", "last_run": {}}
+
+    def _manifest_save(self, manifest: dict) -> None:
+        import json, os as _os
+        p = self._manifest_path()
+        tmp = p + ".tmp"
+        Path(tmp).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        _os.replace(tmp, p)
+
+    def _lock_acquire(self) -> bool:
+        import os
+        p = self._lock_path()
+        if Path(p).exists():
+            try:
+                pid = int(Path(p).read_text(encoding="utf-8").strip())
+                os.kill(pid, 0)
+                return False
+            except Exception:
+                pass
+        Path(p).write_text(str(os.getpid()), encoding="utf-8")
+        return True
+
+    def _lock_release(self) -> None:
+        import os
+        p = self._lock_path()
+        try:
+            if Path(p).exists() and int(Path(p).read_text(encoding="utf-8").strip()) == os.getpid():
+                Path(p).unlink()
+        except Exception:
+            pass
+
+    def _parse_list_line(self, line: str) -> dict | None:
+        import re
+        m = re.match(
+            r"^([dlrwxcst-]{10})\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\S+\s+\S+\s+\S+|\S+\s+\S+:\S+)\s+(\S+)(?:\s+->\s+(.+))?$",
+            line.strip(),
+        )
+        if not m:
+            return None
+        perms, size, mtime, name, target = m.groups()
+        ftype = "dir" if perms.startswith("d") else ("link" if perms.startswith("l") else "file")
+        return {"name": name, "type": ftype, "size": int(size), "mtime": mtime}
+
+    def _list_lines(self, path: str) -> list[str]:
+        self._ensure_connected()
+        base = self._norm(path)
+        lines: list[str] = []
+        try:
+            self._ftp.cwd(base)
+            self._ftp.retrlines("LIST", lines.append)
+        except Exception:
+            pass
+        return lines
+
+    def _parse_manifest_list(self, path: str) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        for line in self._list_lines(path):
+            parsed = self._parse_list_line(line)
+            if parsed:
+                result[parsed["name"]] = {"size": parsed["size"], "mtime": parsed["mtime"], "type": parsed["type"]}
+        return result
+
+    def sync_status(self, local_path: str, remote_path: str) -> dict:
+        try:
+            self._ensure_connected()
+            base = self._norm(remote_path)
+            manifest = self._manifest_load()
+            remote_files = self._parse_manifest_list(base)
+            if not manifest.get("files"):
+                return {"status": "ok", "local": local_path, "remote": base, "new": list(remote_files.keys()), "changed": [], "gone": [], "message": "Manifiesto vacío: inicializar con sync pull"}
+            local_lp = Path(local_path)
+            local_map: dict[str, Path] = {}
+            if local_lp.is_dir():
+                for p in local_lp.rglob("*"):
+                    if p.is_file():
+                        local_map[p.relative_to(local_lp).as_posix()] = p
+            new, changed, gone, same = [], [], [], []
+            for name, info in remote_files.items():
+                lp = local_map.get(name)
+                if lp is None:
+                    new.append(name)
+                elif lp.is_file():
+                    lsize = lp.stat().st_size
+                    if lsize != info["size"]:
+                        changed.append(name)
+                    else:
+                        same.append(name)
+            for name in local_map:
+                if name not in remote_files:
+                    gone.append(name)
+            return {"status": "ok", "local": local_path, "remote": base, "new": sorted(new), "changed": sorted(changed), "gone": sorted(gone), "same": sorted(same)}
+        except Exception as e:
+            return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
+
+    def sync_pull(self, remote_path: str, local_path: str, dry_run: bool = True, parallel: int = 4, expect: int | None = None, prune: bool = False, yes: bool = False) -> dict:
+        import json
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        from datetime import datetime, timezone
+        if not dry_run and not yes:
+            return {"status": "error", "code": "USAGE", "message": "sync pull necesita --yes para escribir", "hint": "Usa --dry-run para ver qué bajaría"}
+        if not self._lock_acquire():
+            return {"status": "error", "code": "ABORTED", "message": "Otro sync está activo", "hint": "Espera o mata el proceso lock"}
+        try:
+            self._ensure_connected()
+            base = self._norm(remote_path)
+            dest = Path(local_path)
+            manifest = self._manifest_load()
+            remote_files = self._parse_manifest_list(base)
+            old_files = manifest.get("files", {})
+            new, changed, same, gone = [], [], [], []
+            for name, info in remote_files.items():
+                old = old_files.get(name, {})
+                if not old:
+                    new.append(name)
+                elif old.get("size") != info["size"] or old.get("mtime") != info["mtime"]:
+                    changed.append(name)
+                else:
+                    same.append(name)
+            for name in old_files:
+                if name not in remote_files:
+                    gone.append(name)
+            to_download = new + changed
+            if expect is not None and len(to_download) != expect:
+                return {"status": "error", "code": "USAGE", "message": f"Expect {expect} no coincide con {len(to_download)}", "hint": "Revisa --expect"}
+            if dry_run:
+                return {"status": "ok", "action": "dry-run", "remote": base, "local": str(dest), "new": len(new), "changed": len(changed), "same": len(same), "gone": len(gone), "to_download": len(to_download), "message": f"Dry-run: {len(to_download)} ficheros a bajar"}
+            count = 0; bytes_total = 0
+            with ThreadPoolExecutor(max_workers=min(parallel, 8)) as pool:
+                futures = {}
+                for name in to_download:
+                    info = remote_files[name]
+                    rpath = f"{base}/{name}" if base != "/" else f"/{name}"
+                    lpath = dest / name
+                    lpath.parent.mkdir(parents=True, exist_ok=True)
+                    futures[pool.submit(self._ftp.retrbinary, f"RETR {rpath}", lpath)] = name
+                for future in futures:
+                    name = futures[future]
+                    try:
+                        future.result()
+                        count += 1
+                    except Exception as e:
+                        return {"status": "error", "code": "NETWORK", "message": f"Falló {name}: {e}", "hint": "Verifica conexión"}
+            for name in to_download:
+                info = remote_files[name]
+                rpath = f"{base}/{name}" if base != "/" else f"/{name}"
+                lpath = dest / name
+                if lpath.is_file() and lpath.stat().st_size != info["size"]:
+                    return {"status": "error", "code": "ABORTED", "message": f"SIZE mismatch en {name}", "hint": "El fichero descargado no coincide"}
+                bytes_total += info["size"]
+            if prune:
+                for name in gone:
+                    lpath = dest / name
+                    if lpath.is_file():
+                        lpath.unlink()
+            new_manifest = {"remote": base, "files": {n: {"size": remote_files[n]["size"], "mtime": remote_files[n]["mtime"]} for n in remote_files}, "updated": datetime.now(timezone.utc).isoformat(), "last_run": {"verb": "pull", "counts": {"new": len(new), "changed": len(changed), "same": len(same), "gone": len(gone)}}}
+            self._manifest_save(new_manifest)
+            return {"status": "ok", "action": "pulled", "remote": base, "local": str(dest), "files": count, "bytes": bytes_total, "new": len(new), "changed": len(changed), "same": len(same), "gone": len(gone)}
+        except Exception as e:
+            return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
+        finally:
+            self._lock_release()
+
+    def sync_push(self, local_path: str, remote_path: str, dry_run: bool = True, expect: int | None = None, yes: bool = False) -> dict:
+        import json
+        from datetime import datetime, timezone
+        if not dry_run and not yes:
+            return {"status": "error", "code": "USAGE", "message": "sync push necesita --yes para escribir", "hint": "Usa --dry-run para ver qué subiría"}
+        if not self._lock_acquire():
+            return {"status": "error", "code": "ABORTED", "message": "Otro sync está activo", "hint": "Espera o mata el proceso lock"}
+        try:
+            self._ensure_connected()
+            base = self._norm(remote_path)
+            dest = Path(local_path)
+            manifest = self._manifest_load()
+            remote_files = self._parse_manifest_list(base)
+            old_files = manifest.get("files", {})
+            local_map: dict[str, Path] = {}
+            if dest.is_dir():
+                for p in dest.rglob("*"):
+                    if p.is_file():
+                        local_map[p.relative_to(dest).as_posix()] = p
+            local_changed = []
+            for name, lp in local_map.items():
+                old = old_files.get(name, {})
+                if not old or lp.stat().st_size != old.get("size", 0):
+                    local_changed.append(name)
+            remote_changed = []
+            for name in old_files:
+                if name in remote_files:
+                    rinfo = remote_files[name]
+                    old_info = old_files[name]
+                    if rinfo["size"] != old_info["size"] or rinfo["mtime"] != old_info["mtime"]:
+                        remote_changed.append(name)
+            conflict = set(local_changed) & set(remote_changed)
+            if conflict:
+                return {"status": "error", "code": "ABORTED", "message": f"Conflicto en: {sorted(conflict)}", "hint": "Cambiado en ambos lados. Resolve manualmente.", "conflicts": sorted(conflict)}
+            if expect is not None and len(local_changed) != expect:
+                return {"status": "error", "code": "USAGE", "message": f"Expect {expect} no coincide con {len(local_changed)}", "hint": "Revisa --expect"}
+            if dry_run:
+                return {"status": "ok", "action": "dry-run", "local": str(dest), "remote": base, "to_upload": len(local_changed), "conflicts": sorted(conflict), "message": f"Dry-run: {len(local_changed)} ficheros a subir"}
+            count = 0; bytes_total = 0
+            for name in local_changed:
+                lp = local_map[name]
+                rpath = f"{base}/{name}" if base != "/" else f"/{name}"
+                self._ftp.storbinary(f"STOR {rpath}", open(lp, "rb"))
+                count += 1
+                bytes_total += lp.stat().st_size
+            for name in local_changed:
+                lp = local_map[name]
+                old_files[name] = {"size": lp.stat().st_size, "mtime": datetime.now(timezone.utc).isoformat()}
+            new_manifest = {"remote": base, "files": old_files, "updated": datetime.now(timezone.utc).isoformat(), "last_run": {"verb": "push", "counts": {"uploaded": count}}}
+            self._manifest_save(new_manifest)
+            return {"status": "ok", "action": "pushed", "local": str(dest), "remote": base, "files": count, "bytes": bytes_total, "conflicts": sorted(conflict)}
+        except Exception as e:
+            return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
+        finally:
+            self._lock_release()
+
     @staticmethod
     def _apply_unified(original: str, patch_text: str) -> str:
         import re
@@ -803,6 +1042,7 @@ Uso:
   mudctl status <carpeta-local> <ruta-remota> [--all]
   mudctl apply <parche> <ruta-remota> [--dry-run] [--yes]
   mudctl plan <plan.json> [--dry-run] [--yes]
+  mudctl sync <pull|push|status> <args> [--dry-run] [--yes] [--expect N] [--parallel N] [--prune]
   mudctl watch <ruta> [--snapshot archivo]
   mudctl describe
 
