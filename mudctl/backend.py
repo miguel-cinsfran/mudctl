@@ -18,6 +18,13 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
+LPC_EXTS = {".c", ".h"}
+
+
+def _lpc_ok(path: str) -> bool:
+    return Path(path).suffix.lower() in LPC_EXTS
+
+
 class FTPBackend(ABC):
     @abstractmethod
     def connect(self) -> bool:
@@ -48,7 +55,7 @@ class FTPBackend(ABC):
         pass
 
     @abstractmethod
-    def mkdir(self, path: str, parents: bool = False) -> dict:
+    def mkdir(self, path: str, parents: bool = False, dry_run: bool = True) -> dict:
         pass
 
     @abstractmethod
@@ -64,7 +71,7 @@ class FTPBackend(ABC):
         pass
 
     @abstractmethod
-    def move(self, source: str, destination: str) -> dict:
+    def move(self, source: str, destination: str, dry_run: bool = True) -> dict:
         pass
 
     @abstractmethod
@@ -72,11 +79,31 @@ class FTPBackend(ABC):
         pass
 
     @abstractmethod
-    def grep(self, pattern: str, path: str, regex: bool = False, case_insensitive: bool = False, max_hits: int = 50) -> dict:
+    def grep(self, pattern: str, path: str, regex: bool = False, case_insensitive: bool = False, max_hits: int = 50, all_files: bool = False) -> dict:
         pass
 
     @abstractmethod
     def scaffold(self, source: str, destination: str, dry_run: bool = True) -> dict:
+        pass
+
+    @abstractmethod
+    def status(self, local_base: str, remote_path: str, all_files: bool = False, max_bytes: int = 5 * 1024 * 1024) -> dict:
+        pass
+
+    @abstractmethod
+    def tail(self, path: str, lines: int = 30) -> dict:
+        pass
+
+    @abstractmethod
+    def watch(self, path: str, snapshot_file: str | None = None) -> dict:
+        pass
+
+    @abstractmethod
+    def apply(self, patch_file: str, remote_path: str, dry_run: bool = True) -> dict:
+        pass
+
+    @abstractmethod
+    def plan(self, ops: list[dict], dry_run: bool = True) -> dict:
         pass
 
     @abstractmethod
@@ -318,10 +345,12 @@ class FTPClientBackend(FTPBackend):
         except Exception as e:
             return []
 
-    def mkdir(self, path: str, parents: bool = False) -> dict:
+    def mkdir(self, path: str, parents: bool = False, dry_run: bool = True) -> dict:
         werr = self._writable_error(path)
         if werr:
             return werr
+        if dry_run:
+            return {"status": "ok", "action": "dry-run", "path": path, "parents": parents, "message": f"Se crearia: {path}"}
         try:
             self._ensure_connected()
             if not parents:
@@ -341,22 +370,48 @@ class FTPClientBackend(FTPBackend):
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
 
     def rm(self, path: str, recursive: bool = False, dry_run: bool = True, expect: int | None = None, max_files: int | None = None) -> dict:
+        werr = self._writable_error(path)
+        if werr:
+            return werr
+        target = self._norm(path)
+        if recursive:
+            try:
+                self._ensure_connected()
+                dirs, files = self._walk_remote(target)
+                count = len(files)
+            except Exception as e:
+                return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
+            if expect is not None and expect != count:
+                return {"status": "error", "code": "ABORTED", "message": f"Expect {expect} no coincide con {count}", "hint": "Revisa --expect"}
+            if max_files is not None and count > max_files:
+                return {"status": "error", "code": "ABORTED", "message": f"Supera --max {max_files}", "hint": "Sube --max o reduce el alcance"}
+            if dry_run:
+                return {"status": "ok", "action": "dry-run", "path": target, "recursive": True, "files": count, "message": f"Se borrarian {count} ficheros bajo {target}"}
+            try:
+                for rf in files:
+                    self._ftp.delete(rf)
+                for d in sorted(dirs[1:], reverse=True):
+                    try:
+                        self._ftp.rmd(d)
+                    except Exception:
+                        pass
+                try:
+                    self._ftp.rmd(target)
+                except Exception:
+                    pass
+                return {"path": target, "deleted": True, "files": count, "status": "ok"}
+            except Exception as e:
+                return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
         count = 1
         if expect is not None and expect != count:
             return {"status": "error", "code": "ABORTED", "message": f"Expect {expect} no coincide con {count}", "hint": "Revisa --expect"}
         if max_files is not None and count > max_files:
             return {"status": "error", "code": "ABORTED", "message": f"Supera --max {max_files}", "hint": "Sube --max o reduce el alcance"}
         if dry_run:
-            msg = f"Se borraria: {path}"
-            if recursive:
-                msg += " (recursivo)"
-            return {"status": "ok", "action": "dry-run", "path": path, "recursive": recursive, "message": msg}
+            return {"status": "ok", "action": "dry-run", "path": path, "recursive": False, "message": f"Se borraria: {path}"}
         try:
             self._ensure_connected()
-            if recursive:
-                self._ftp.rmd(path)
-            else:
-                self._ftp.delete(path)
+            self._ftp.delete(path)
             return {"path": path, "deleted": True, "status": "ok"}
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
@@ -380,10 +435,12 @@ class FTPClientBackend(FTPBackend):
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
 
-    def move(self, source: str, destination: str) -> dict:
+    def move(self, source: str, destination: str, dry_run: bool = True) -> dict:
         werr = self._writable_error(destination)
         if werr:
             return werr
+        if dry_run:
+            return {"status": "ok", "action": "dry-run", "source": source, "destination": destination, "message": f"Se moveria: {source} -> {destination}"}
         try:
             self._ensure_connected()
             self._ftp.rename(source, destination)
@@ -427,12 +484,14 @@ class FTPClientBackend(FTPBackend):
         except Exception as e:
             return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
 
-    def grep(self, pattern: str, path: str, regex: bool = False, case_insensitive: bool = False, max_hits: int = 50) -> dict:
+    def grep(self, pattern: str, path: str, regex: bool = False, case_insensitive: bool = False, max_hits: int = 50, all_files: bool = False) -> dict:
         try:
             self._ensure_connected()
             import io
             import re
             _dirs, files = self._walk_remote(path)
+            if not all_files:
+                files = [f for f in files if _lpc_ok(f)]
             flags = re.IGNORECASE if case_insensitive else 0
             rx = re.compile(pattern, flags) if regex else None
             needle = pattern.lower() if case_insensitive and not regex else pattern
@@ -481,6 +540,217 @@ class FTPClientBackend(FTPBackend):
                 return {"status": "error", "code": "ABORTED", "message": err, "hint": "Elegi otro nombre"}
             return {"status": "error", "code": "NETWORK", "message": err, "hint": "Verifica las rutas"}
 
+    def status(self, local_base: str, remote_path: str, all_files: bool = False, max_bytes: int = 5 * 1024 * 1024) -> dict:
+        try:
+            self._ensure_connected()
+            import hashlib
+            import io
+            base = self._norm(remote_path)
+            _dirs, files = self._walk_remote(base)
+            if not all_files:
+                files = [f for f in files if _lpc_ok(f)]
+            lb = Path(local_base)
+            remote_set = {f[len(base):].lstrip("/") for f in files}
+            local_map: dict[str, Path] = {}
+            if lb.is_dir():
+                for p in lb.rglob("*"):
+                    if p.is_file():
+                        rel = p.relative_to(lb).as_posix()
+                        if all_files or _lpc_ok(rel):
+                            local_map[rel] = p
+            same, changed, only_local, only_remote, skipped = [], [], [], [], []
+            for rf in files:
+                rel = rf[len(base):].lstrip("/")
+                lp = local_map.get(rel)
+                if lp is None:
+                    only_remote.append(rel)
+                    continue
+                try:
+                    buf = io.BytesIO()
+                    self._ftp.retrbinary(f"RETR {rf}", buf.write)
+                    raw = buf.getvalue()
+                except Exception:
+                    skipped.append(rel)
+                    continue
+                if len(raw) > max_bytes:
+                    skipped.append(rel)
+                    continue
+                rh = hashlib.sha256(raw).hexdigest()
+                lh = hashlib.sha256(lp.read_bytes()).hexdigest()
+                (same if rh == lh else changed).append(rel)
+            for rel in local_map:
+                if rel not in remote_set:
+                    only_local.append(rel)
+            return {"status": "ok", "remote": base, "local": str(lb), "same": sorted(same), "changed": sorted(changed), "only_local": sorted(only_local), "only_remote": sorted(only_remote), "skipped": sorted(skipped)}
+        except Exception as e:
+            return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
+
+    def tail(self, path: str, lines: int = 30) -> dict:
+        try:
+            self._ensure_connected()
+            import io
+            buf = io.BytesIO()
+            self._ftp.retrbinary(f"RETR {path}", buf.write)
+            text = buf.getvalue().decode(self._encoding, errors="replace")
+            all_lines = text.splitlines()
+            return {"status": "ok", "path": path, "lines": all_lines[-lines:], "total": len(all_lines)}
+        except Exception as e:
+            return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
+
+    def watch(self, path: str, snapshot_file: str | None = None) -> dict:
+        import json
+        try:
+            self._ensure_connected()
+            snap = snapshot_file or ".mudctl-watch.json"
+            base = self._norm(path)
+            _dirs, files = self._walk_remote(base)
+            current = sorted(files)
+            old = []
+            try:
+                old = json.loads(Path(snap).read_text(encoding="utf-8")).get(base, [])
+            except Exception:
+                pass
+            old_set, cur_set = set(old), set(current)
+            result = {"status": "ok", "path": base, "new": sorted(cur_set - old_set), "gone": sorted(old_set - cur_set), "snapshot": snap}
+            try:
+                data = {}
+                try:
+                    data = json.loads(Path(snap).read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+                data[base] = current
+                Path(snap).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                result["snapshot_warning"] = str(e)[:120]
+            return result
+        except Exception as e:
+            return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica la ruta"}
+
+    @staticmethod
+    def _apply_unified(original: str, patch_text: str) -> str:
+        import re
+        src = original.splitlines(keepends=False)
+        out: list[str] = []
+        lines = patch_text.splitlines()
+        i = 0
+        src_i = 0
+        hunk = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("---") or line.startswith("+++"):
+                i += 1
+                continue
+            m = hunk.match(line)
+            if not m:
+                i += 1
+                continue
+            start = int(m.group(1))
+            while src_i < start - 1:
+                out.append(src[src_i])
+                src_i += 1
+            i += 1
+            while i < len(lines) and not lines[i].startswith("@@"):
+                h = lines[i]
+                if h.startswith(" ") or h == "":
+                    if src_i >= len(src) or src[src_i] != h[1:]:
+                        raise ValueError(f"Contexto no calza en línea {src_i + 1}")
+                    out.append(src[src_i])
+                    src_i += 1
+                elif h.startswith("-"):
+                    if src_i >= len(src) or src[src_i] != h[1:]:
+                        raise ValueError(f"Borrado no calza en línea {src_i + 1}")
+                    src_i += 1
+                elif h.startswith("+"):
+                    out.append(h[1:])
+                elif h.startswith("\\"):
+                    pass
+                else:
+                    raise ValueError(f"Línea de parche desconocida: {h[:40]}")
+                i += 1
+        while src_i < len(src):
+            out.append(src[src_i])
+            src_i += 1
+        text = "\n".join(out)
+        if original.endswith("\n"):
+            text += "\n"
+        return text
+
+    def apply(self, patch_file: str, remote_path: str, dry_run: bool = True) -> dict:
+        werr = self._writable_error(remote_path)
+        if werr:
+            return werr
+        try:
+            patch_text = Path(patch_file).read_text(encoding="utf-8")
+        except Exception as e:
+            return {"status": "error", "code": "USAGE", "message": f"No pude leer el parche: {e}", "hint": "Revisa la ruta del fichero de parche"}
+        try:
+            self._ensure_connected()
+            import io
+            buf = io.BytesIO()
+            self._ftp.retrbinary(f"RETR {remote_path}", buf.write)
+            original = buf.getvalue().decode(self._encoding, errors="replace")
+            try:
+                new_text = self._apply_unified(original, patch_text)
+            except ValueError as e:
+                return {"status": "error", "code": "ABORTED", "message": f"El parche no calza: {e}", "hint": "Regenera el parche contra la versión actual del fichero"}
+            hunks = sum(1 for l in patch_text.splitlines() if l.startswith("@@"))
+            if dry_run:
+                return {"status": "ok", "action": "dry-run", "remote": remote_path, "hunks": hunks, "message": f"Se aplicarian {hunks} bloques en {remote_path}"}
+            self._ftp.storbinary(f"STOR {remote_path}", io.BytesIO(new_text.encode(self._encoding)))
+            return {"status": "ok", "action": "applied", "remote": remote_path, "hunks": hunks}
+        except Exception as e:
+            return {"status": "error", "code": "NETWORK", "message": str(e), "hint": "Verifica las rutas"}
+
+    def plan(self, ops: list[dict], dry_run: bool = True) -> dict:
+        steps: list[dict] = []
+        for n, op in enumerate(ops, 1):
+            verb = str(op.get("verb", "")).lower()
+            try:
+                if verb == "put":
+                    r = self.put(op["local"], op["remote"], dry_run=True, recursive=bool(op.get("recursive", False)), expect=op.get("expect"))
+                elif verb == "cp":
+                    r = self.cp(op["source"], op["destination"], dry_run=True)
+                elif verb == "rm":
+                    r = self.rm(op["path"], recursive=bool(op.get("recursive", False)), dry_run=True, expect=op.get("expect"), max_files=op.get("max"))
+                elif verb == "mkdir":
+                    r = self.mkdir(op["path"], parents=bool(op.get("parents", True)), dry_run=True)
+                elif verb == "move":
+                    r = self.move(op["source"], op["destination"], dry_run=True)
+                elif verb == "scaffold":
+                    r = self.scaffold(op["source"], op["destination"], dry_run=True)
+                elif verb == "apply":
+                    r = self.apply(op["patch"], op["remote"], dry_run=True)
+                else:
+                    r = {"status": "error", "code": "USAGE", "message": f"Verbo no soportado en plan: {verb}", "hint": "Usa put, cp, rm, mkdir, move, scaffold o apply"}
+            except KeyError as e:
+                r = {"status": "error", "code": "USAGE", "message": f"Falta campo {e} en el paso {n}", "hint": "Revisa el plan.json"}
+            steps.append({"step": n, "verb": verb, "result": r})
+            if r.get("status") != "ok":
+                return {"status": "error", "code": r.get("code", "ABORTED"), "message": f"El plan frena en el paso {n}", "hint": "Corrige el paso y revalida", "steps": steps}
+        if dry_run:
+            return {"status": "ok", "action": "dry-run", "steps": steps, "message": f"Plan válido con {len(steps)} pasos"}
+        done: list[dict] = []
+        for s in steps:
+            n, verb, op = s["step"], s["verb"], ops[s["step"] - 1]
+            if verb == "put":
+                r = self.put(op["local"], op["remote"], dry_run=False, recursive=bool(op.get("recursive", False)), expect=op.get("expect"))
+            elif verb == "cp":
+                r = self.cp(op["source"], op["destination"], dry_run=False)
+            elif verb == "rm":
+                r = self.rm(op["path"], recursive=bool(op.get("recursive", False)), dry_run=False, expect=op.get("expect"), max_files=op.get("max"))
+            elif verb == "mkdir":
+                r = self.mkdir(op["path"], parents=bool(op.get("parents", True)))
+            elif verb == "move":
+                r = self.move(op["source"], op["destination"])
+            elif verb == "scaffold":
+                r = self.scaffold(op["source"], op["destination"], dry_run=False)
+            elif verb == "apply":
+                r = self.apply(op["patch"], op["remote"], dry_run=False)
+            done.append({"step": n, "verb": verb, "result": r})
+            if r.get("status") != "ok":
+                return {"status": "error", "code": r.get("code", "NETWORK"), "message": f"El plan frenó en el paso {n}", "hint": "Lo anterior ya se aplicó, revisa el estado", "done": done}
+        return {"status": "ok", "action": "applied", "done": done}
+
     def describe(self) -> str:
         return """mudctl — CLI FTP para Reinos de Leyenda
 
@@ -491,14 +761,19 @@ Uso:
   mudctl put <local_path> <remote_path> [--dry-run] [--yes] [--expect N] [--recursive]
   mudctl diff <local_path> <remote_path>
   mudctl search <patron> [ruta] [--regex] [--case-insensitive]
-  mudctl grep <patron> [ruta] [--regex] [--case-insensitive] [--max N]
-  mudctl mkdir <ruta> [--parents]
+  mudctl grep <patron> [ruta] [--regex] [--case-insensitive] [--max N] [--all]
+  mudctl mkdir <ruta> [--parents] [--dry-run] [--yes]
   mudctl rm <ruta> [--recursive] [--dry-run] [--yes] [--expect N] [--max N]
   mudctl cat <ruta>
   mudctl info <ruta>
-  mudctl move <origen> <destino>
+  mudctl tail <ruta> [--lines N]
+  mudctl move <origen> <destino> [--dry-run] [--yes]
   mudctl cp <origen> <destino> [--dry-run] [--yes]
   mudctl scaffold <ejemplo> <destino-nuevo> [--dry-run] [--yes]
+  mudctl status <carpeta-local> <ruta-remota> [--all]
+  mudctl apply <parche> <ruta-remota> [--dry-run] [--yes]
+  mudctl plan <plan.json> [--dry-run] [--yes]
+  mudctl watch <ruta> [--snapshot archivo]
   mudctl describe
 
 Salida: texto plano por defecto (NVDA), --json para agentes.

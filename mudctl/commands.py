@@ -40,6 +40,11 @@ def run(backend: FTPBackend, argv: list[str] | None = None) -> int:
         "cp": lambda: handle_cp(backend, rest),
         "grep": lambda: handle_grep(backend, rest),
         "scaffold": lambda: handle_scaffold(backend, rest),
+        "status": lambda: handle_status(backend, rest),
+        "tail": lambda: handle_tail(backend, rest),
+        "watch": lambda: handle_watch(backend, rest),
+        "apply": lambda: handle_apply(backend, rest),
+        "plan": lambda: handle_plan(backend, rest),
         "describe": lambda: make_result(True, "describe", data={"help": backend.describe()}),
     }
 
@@ -144,10 +149,11 @@ def handle_search(backend: FTPBackend, args: list[str]) -> Result:
 
 def handle_mkdir(backend: FTPBackend, args: list[str]) -> Result:
     if not args:
-        return make_result(False, "mkdir", error={"code": "USAGE", "message": "Usage: mudctl mkdir <path> [--parents]", "hint": "Provide at least the path."})
+        return make_result(False, "mkdir", error={"code": "USAGE", "message": "Usage: mudctl mkdir <path> [--parents] [--dry-run] [--yes]", "hint": "Provide at least the path."})
     path = args[0]
     parents = "--parents" in args
-    data = backend.mkdir(path, parents=parents)
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
+    data = backend.mkdir(path, parents=parents, dry_run=dry_run)
     if "status" in data and data["status"] == "ok":
         return make_result(True, "mkdir", data=data)
     return make_result(False, "mkdir", error=data)
@@ -201,10 +207,11 @@ def handle_info(backend: FTPBackend, args: list[str]) -> Result:
 
 def handle_move(backend: FTPBackend, args: list[str]) -> Result:
     if len(args) < 2:
-        return make_result(False, "move", error={"code": "USAGE", "message": "Usage: mudctl move <source> <destination>", "hint": "Provide source and destination."})
+        return make_result(False, "move", error={"code": "USAGE", "message": "Usage: mudctl move <source> <destination> [--dry-run] [--yes]", "hint": "Provide source and destination."})
     source = args[0]
     destination = args[1]
-    data = backend.move(source, destination)
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
+    data = backend.move(source, destination, dry_run=dry_run)
     if "status" in data and data["status"] == "ok":
         return make_result(True, "move", data=data)
     return make_result(False, "move", error=data)
@@ -229,6 +236,7 @@ def handle_grep(backend: FTPBackend, args: list[str]) -> Result:
     path = args[1] if len(args) > 1 and not args[1].startswith("--") else "/"
     regex = "--regex" in args
     case_insensitive = "--case-insensitive" in args
+    all_files = "--all" in args
     max_hits = 50
     for i, a in enumerate(args):
         if a == "--max" and i + 1 < len(args):
@@ -236,7 +244,7 @@ def handle_grep(backend: FTPBackend, args: list[str]) -> Result:
                 max_hits = int(args[i + 1])
             except ValueError:
                 return make_result(False, "grep", error={"code": "USAGE", "message": "Max debe ser numero", "hint": "Usa --max N con N entero"})
-    data = backend.grep(pattern, path, regex=regex, case_insensitive=case_insensitive, max_hits=max_hits)
+    data = backend.grep(pattern, path, regex=regex, case_insensitive=case_insensitive, max_hits=max_hits, all_files=all_files)
     if "status" in data and data["status"] == "ok":
         return make_result(True, "grep", data=data)
     return make_result(False, "grep", error=data)
@@ -252,3 +260,68 @@ def handle_scaffold(backend: FTPBackend, args: list[str]) -> Result:
     if "status" in data and data["status"] == "ok":
         return make_result(True, "scaffold", data=data)
     return make_result(False, "scaffold", error=data)
+
+
+def handle_status(backend: FTPBackend, args: list[str]) -> Result:
+    if len(args) < 2:
+        return make_result(False, "status", error={"code": "USAGE", "message": "Usage: mudctl status <carpeta-local> <ruta-remota> [--all]", "hint": "Compara tu carpeta local contra la remota por hash."})
+    data = backend.status(args[0], args[1], all_files=("--all" in args))
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "status", data=data)
+    return make_result(False, "status", error=data)
+
+
+def handle_tail(backend: FTPBackend, args: list[str]) -> Result:
+    if not args:
+        return make_result(False, "tail", error={"code": "USAGE", "message": "Usage: mudctl tail <ruta> [--lines N]", "hint": "Muestra la cola de un fichero remoto."})
+    lines = 30
+    for i, a in enumerate(args):
+        if a == "--lines" and i + 1 < len(args):
+            try:
+                lines = int(args[i + 1])
+            except ValueError:
+                return make_result(False, "tail", error={"code": "USAGE", "message": "Lines debe ser numero", "hint": "Usa --lines N con N entero"})
+    data = backend.tail(args[0], lines=lines)
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "tail", data=data)
+    return make_result(False, "tail", error=data)
+
+
+def handle_watch(backend: FTPBackend, args: list[str]) -> Result:
+    if not args:
+        return make_result(False, "watch", error={"code": "USAGE", "message": "Usage: mudctl watch <ruta> [--snapshot archivo]", "hint": "Lista novedades contra la corrida anterior."})
+    snap = None
+    for i, a in enumerate(args):
+        if a == "--snapshot" and i + 1 < len(args):
+            snap = args[i + 1]
+    data = backend.watch(args[0], snapshot_file=snap)
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "watch", data=data)
+    return make_result(False, "watch", error=data)
+
+
+def handle_apply(backend: FTPBackend, args: list[str]) -> Result:
+    if len(args) < 2:
+        return make_result(False, "apply", error={"code": "USAGE", "message": "Usage: mudctl apply <parche> <ruta-remota> [--dry-run] [--yes]", "hint": "Aplica un parche unificado a un fichero remoto."})
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
+    data = backend.apply(args[0], args[1], dry_run=dry_run)
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "apply", data=data)
+    return make_result(False, "apply", error=data)
+
+
+def handle_plan(backend: FTPBackend, args: list[str]) -> Result:
+    if not args:
+        return make_result(False, "plan", error={"code": "USAGE", "message": "Usage: mudctl plan <plan.json> [--dry-run] [--yes]", "hint": "Valida y aplica un lote de operaciones con un solo --yes."})
+    import json
+    try:
+        ops = json.loads(open(args[0], encoding="utf-8").read())
+    except Exception as e:
+        return make_result(False, "plan", error={"code": "USAGE", "message": f"No pude leer el plan: {e}", "hint": "Revisa la ruta del plan.json"})
+    if isinstance(ops, dict) and "ops" in ops:
+        ops = ops["ops"]
+    dry_run = ("--dry-run" in args) or ("--yes" not in args)
+    data = backend.plan(ops, dry_run=dry_run)
+    if "status" in data and data["status"] == "ok":
+        return make_result(True, "plan", data=data)
+    return make_result(False, "plan", error=data)
