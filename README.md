@@ -70,6 +70,21 @@ mudctl scaffold /otros/mago/espada.c /hazrakh/mi_espada.c --yes
 
 # Buscar texto dentro de ficheros de otras carpetas
 mudctl grep "hereda de" /otros --case-insensitive --max 20
+
+# Comparar tu carpeta local contra la remota
+mudctl status ./mipack /hazrakh/mipack
+
+# Aplicar un parche a un fichero remoto
+mudctl apply fix.patch /hazrakh/espada.c --dry-run
+mudctl apply fix.patch /hazrakh/espada.c --yes
+
+# Validar y aplicar un lote con un solo --yes
+mudctl plan cambios.json --dry-run
+mudctl plan cambios.json --yes
+
+# Ver la cola de un log y vigilar novedades ajenas
+mudctl tail /hazrakh/log.txt --lines 30
+mudctl watch /otros/mago
 ```
 
 ## Opciones globales
