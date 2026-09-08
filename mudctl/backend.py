@@ -769,9 +769,9 @@ class FTPClientBackend(FTPBackend):
             elif verb == "rm":
                 r = self.rm(op["path"], recursive=bool(op.get("recursive", False)), dry_run=False, expect=op.get("expect"), max_files=op.get("max"))
             elif verb == "mkdir":
-                r = self.mkdir(op["path"], parents=bool(op.get("parents", True)))
+                r = self.mkdir(op["path"], parents=bool(op.get("parents", True)), dry_run=False)
             elif verb == "move":
-                r = self.move(op["source"], op["destination"])
+                r = self.move(op["source"], op["destination"], dry_run=False)
             elif verb == "scaffold":
                 r = self.scaffold(op["source"], op["destination"], dry_run=False)
             elif verb == "apply":

@@ -149,3 +149,17 @@ def test_mkdir_move_dry():
     r3 = b.move("/hazrakh/log.txt", "/hazrakh/log2.txt")
     assert r3["status"] == "ok" and r3["action"] == "dry-run"
     assert "/hazrakh/log2.txt" not in b._ftp.files
+
+
+def test_plan_yes_ejecuta_mkdir_move():
+    b = make_backend_v03()
+    ops = [
+        {"verb": "mkdir", "path": "/hazrakh/lote"},
+        {"verb": "move", "source": "/hazrakh/log.txt", "destination": "/hazrakh/lote/log.txt"},
+    ]
+    r = b.plan(ops, dry_run=False)
+    assert r["status"] == "ok" and r["action"] == "applied"
+    assert all(s["result"].get("status") == "ok" and s["result"].get("action") != "dry-run" for s in r["done"])
+    assert "/hazrakh/lote" in b._ftp.dirs
+    assert "/hazrakh/lote/log.txt" in b._ftp.files
+    assert "/hazrakh/log.txt" not in b._ftp.files
