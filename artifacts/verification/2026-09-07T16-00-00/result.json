@@ -1,0 +1,8 @@
+{
+  "command": "uv run pytest tests/ -q && git push origin master && preflight_revision.py --kind skill",
+  "exit_code": 0,
+  "stdout_tail": "43 passed in 0.15s\nTo https://github.com/miguel-cinsfran/mudctl.git\n   a08bb5e..dc526bb  master -> master\nVEREDICTO: PASS — se puede invocar a Luna (warns: 0)",
+  "stderr_tail": "",
+  "criterion": "43 tests pasando (29 viejos + 14 nuevos), push exit 0, preflight PASS 0 warns",
+  "verdict": "PASS"
+}
