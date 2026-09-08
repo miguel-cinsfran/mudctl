@@ -1,0 +1,1 @@
+{"command": "uv run pytest -q + CLI v03","criterion": "25 tests en verde, status por hash, apply con calce y aborto, plan en lote, tail y watch","exit_code": 0,"stderr_tail": "","stdout_tail": "25 passed in 0.09s; CLI status/tail/watch/apply/plan ok","verdict": "PASS"}
