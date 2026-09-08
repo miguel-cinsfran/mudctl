@@ -1,0 +1,8 @@
+{
+  "command": "python C:/Users/ic_ma/AppData/Local/hermes/profiles/coding/scripts/mirror-backup.py --keep 3",
+  "exit_code": 0,
+  "stdout_tail": "[OK] Backup creado: .../backups/2026-09-08-4; [OK] Archivos descargados: 113; [OK] Backup íntegro: 113 archivos verificados; [RESUMEN] Backup válido; 0 backups viejos borrados.",
+  "stderr_tail": "",
+  "criterion": "descarga fresca, manifiesto SHA-256, verificación íntegra, lock limpio y rotación conservadora",
+  "verdict": "PASS"
+}
