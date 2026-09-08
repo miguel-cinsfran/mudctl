@@ -2,11 +2,26 @@ from __future__ import annotations
 
 
 def test_load_config():
-    from mudctl.utils import load_config
-    config = load_config()
-    assert config["host"] == "reinosdeleyenda.es"
-    assert config["port"] == 3008
-    assert config["user"] == "hazrakh"
+    import os
+    # Guardar estado del entorno para no afectar a otros tests
+    old = {k: os.environ.get(k) for k in ("MUD_HOST", "MUD_PORT", "MUD_USER",
+                                           "MUD_PASSWORD", "MUD_PROTOCOL",
+                                           "MUD_TIMEOUT", "MUD_ENCODING",
+                                           "MUD_ROOT", "MUD_HOME")}
+    for k in old:
+        os.environ.pop(k, None)
+    try:
+        from mudctl.utils import load_config
+        config = load_config()
+        assert config["host"] == "reinosdeleyenda.es"
+        assert config["port"] == 3008
+        assert config["user"] == "hazrakh"
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def test_env_loading():

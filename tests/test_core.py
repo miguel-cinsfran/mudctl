@@ -44,11 +44,24 @@ def test_exit_codes():
 
 
 def test_utils_load_config():
-    from mudctl.utils import load_config
-
-    config = load_config()
-    assert "host" in config
-    assert "port" in config
-    assert "user" in config
-    assert config["host"] == "reinosdeleyenda.es"
-    assert config["port"] == 3008
+    import os
+    old = {k: os.environ.get(k) for k in ("MUD_HOST", "MUD_PORT", "MUD_USER",
+                                           "MUD_PASSWORD", "MUD_PROTOCOL",
+                                           "MUD_TIMEOUT", "MUD_ENCODING",
+                                           "MUD_ROOT", "MUD_HOME")}
+    for k in old:
+        os.environ.pop(k, None)
+    try:
+        from mudctl.utils import load_config
+        config = load_config()
+        assert "host" in config
+        assert "port" in config
+        assert "user" in config
+        assert config["host"] == "reinosdeleyenda.es"
+        assert config["port"] == 3008
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
