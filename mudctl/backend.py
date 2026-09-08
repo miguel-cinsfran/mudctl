@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from ftplib import FTP, error_perm
+from ftplib import FTP, FTP_TLS, error_perm
 from pathlib import Path
 from abc import ABC, abstractmethod
 
@@ -12,6 +12,20 @@ load_dotenv()
 
 from mudctl.errors import AuthenticationError, NetworkError, NotFoundError, UsageError
 from mudctl.output import Result, OutputFormatter, ExitCode, make_result, make_error
+
+
+class _FTPSReuse(FTP_TLS):
+    """FTP_TLS que reutiliza la sesion SSL en conexiones de datos.
+
+    vsFTPd con require_ssl_reuse=YES (como rlmud.org) rechaza LIST/RETR/STOR
+    con '522 SSL connection failed: session reuse required' si no se hace.
+    """
+
+    def ntransfercmd(self, cmd, rest=None):
+        conn, size = FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(conn, server_hostname=self.host, session=self.sock.session)
+        return conn, size
 
 
 def _env(key: str, default: str = "") -> str:
@@ -126,12 +140,20 @@ class FTPClientBackend(FTPBackend):
         self._encoding = _env("MUD_ENCODING", "utf-8")
         self._root = _env("MUD_ROOT", "/")
         self._home = _env("MUD_HOME", f"/{self._user}")
+        self._protocol = _env("MUD_PROTOCOL", "ftp").lower()
 
     def connect(self) -> bool:
         try:
-            self._ftp = FTP()
-            self._ftp.connect(self._host, self._port, timeout=self._timeout)
-            self._ftp.login(self._user, self._password)
+            if self._protocol == "ftps":
+                ftps = _FTPSReuse()
+                ftps.connect(self._host, self._port, timeout=self._timeout)
+                ftps.login(self._user, self._password)
+                ftps.prot_p()
+                self._ftp = ftps
+            else:
+                self._ftp = FTP()
+                self._ftp.connect(self._host, self._port, timeout=self._timeout)
+                self._ftp.login(self._user, self._password)
             self._ftp.encoding = self._encoding
             return True
         except error_perm as e:
@@ -238,7 +260,7 @@ class FTPClientBackend(FTPBackend):
             self.connect()
             self._ftp.sendcmd("NOOP")
             self.disconnect()
-            return {"status": "ok", "host": self._host, "port": self._port, "user": self._user, "protocol": "ftp", "message": "Conexion exitosa"}
+            return {"status": "ok", "host": self._host, "port": self._port, "user": self._user, "protocol": self._protocol, "message": "Conexion exitosa"}
         except AuthenticationError as e:
             return {"status": "error", "code": "AUTH", "message": str(e.message), "hint": e.hint}
         except NetworkError as e:
@@ -248,7 +270,15 @@ class FTPClientBackend(FTPBackend):
         try:
             self._ensure_connected()
             files = []
-            self._ftp.retrlines(f"LIST {path}", files.append)
+            base = self._norm(path)
+            try:
+                # vsFTPd responde "LIST <dir>" con la entrada del propio dir:
+                # entrar y listar sin args trae los hijos de verdad.
+                self._ftp.cwd(base)
+                self._ftp.retrlines("LIST", files.append)
+            except Exception:
+                files = []
+                self._ftp.retrlines(f"LIST {base}", files.append)
             return [{"raw": f} for f in files]
         except Exception as e:
             return []

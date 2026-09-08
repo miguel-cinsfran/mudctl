@@ -1,6 +1,9 @@
 # mudctl — Estado del Proyecto
 
-Fecha: 2026-09-07, revisión Lorena directa (sin arnés).
+Fecha: 2026-09-07, revisión Lorena directa (sin arnés). Noche: primera conexión REAL.
+
+## Estado actual
+v0.3 + FTPS en master local. Credencial de Satyr (rlmud.org:3008, hazrakh) en .env. Doctor en verde por FTPS. Lecturas reales OK (list, cat). Sin push: falta OK de Miguel.
 
 ## Estado actual
 Implementado v0.1.0 local, 6 commits en master, repo público miguel-cinsfran/mudctl. Cambios locales sin push pendientes de OK de Miguel.
@@ -16,6 +19,10 @@ Implementado v0.1.0 local, 6 commits en master, repo público miguel-cinsfran/mu
 
 ## Qué falta / límites honestos
 - Sin prueba real contra reinosdeleyenda.es:3008. MUD_PASSWORD vacía en .env, doctor daría AUTH. Falta confirmar con Mordisko si el acceso hazrakh sigue vivo.
+- RESUELTO 2026-09-07 noche: Satyr dio clave nueva (servidor rlmud.org:3008). Servidor exige FTPS (530 Non-anonymous sessions must use encryption) → backend ahora soporta MUD_PROTOCOL=ftps con reuso de sesión SSL (vsFTPd). Doctor verde.
+- Lectura real OK: list / trae el árbol (baseobs, cmds, players...), list /doc trae hijos, cat /doc/AGRADECIMIENTOS trae contenido.
+- NO existe /hazrakh en el servidor y hazrakh solo entra a 10 dirs (baseobs, d, doc, grupos, include, o, open, salas, table, w). Falta que Satyr diga dónde trabajar o cree el home. Sin eso no hay escritura real posible ni debida.
+- grep sobre árboles grandes por FTPS es lento (cada fichero abre conexión+TLS): timed out a 180s en /doc. Para búsquedas grandes, acotar ruta o pedir índice.
 - Protocolo: solo ftp con ftplib. SPEC menciona ftps/sftp pero no implementado. Puerto 3008 atípico para FTP, pendiente confirmar.
 - diff solo compara tamaño, no contenido. Vale para v0.1, no para edición fina.
 - Tests solo cubren output y utils. Sin tests con FTP falso para los verbos. Los 12 que pasan no prueban red.
