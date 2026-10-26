@@ -203,26 +203,37 @@ def dated_destination(date_str: str) -> Path:
     return candidate
 
 
-def rotate_backups(keep: int, today: datetime.date, dry_run: bool) -> int:
+def rotate_backups(keep: int, today: datetime.date, dry_run: bool) -> tuple[int, list[str]]:
+    """Borra backups fuera de retención. Devuelve (borrados, fallos).
+
+    Un backup viejo que no se puede borrar no invalida el backup fresco: se
+    informa y se sigue, para que el cron no grite por un residuo inaccesible.
+    """
     cutoff = today - datetime.timedelta(days=keep)
     removed = 0
+    failures: list[str] = []
     if not BACKUP_ROOT.exists():
-        return removed
+        return removed, failures
     for entry in BACKUP_ROOT.iterdir():
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
         try:
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
             entry_date = datetime.date.fromisoformat(entry.name[:10])
-        except ValueError:
+        except (OSError, ValueError):
             continue
         if entry_date < cutoff:
             if dry_run:
                 print(f"[DRY-RUN] Borraría: {entry}")
             else:
-                shutil.rmtree(entry)
+                try:
+                    shutil.rmtree(entry)
+                except OSError as exc:
+                    failures.append(f"{entry.name}: {type(exc).__name__}: {exc}")
+                    print(f"[WARN] No se pudo borrar {entry.name}: {type(exc).__name__}")
+                    continue
                 print(f"[OK] Borrado: {entry}")
             removed += 1
-    return removed
+    return removed, failures
 
 
 def main() -> int:
@@ -281,8 +292,19 @@ def main() -> int:
         if verify_backup(destination) != 0:
             print("[ERROR] El backup recién creado no pasó la verificación.")
             return 1
-        removed = rotate_backups(args.keep, today, dry_run=False)
+        removed, failures = rotate_backups(args.keep, today, dry_run=False)
         print(f"[RESUMEN] Backup válido; {removed} backups viejos borrados.")
+        if failures:
+            print(f"[WARN] Retención incompleta: {len(failures)} backups no se pudieron borrar.")
+            for detail in failures:
+                print(f"  - {detail}")
+            pendientes = [
+                entry for entry in BACKUP_ROOT.iterdir()
+                if entry.is_dir() and not entry.name.startswith(".")
+            ]
+            if len(pendientes) > args.keep + 1:
+                print(f"[ERROR] Se acumulan {len(pendientes)} backups; hace falta limpieza manual de la retención.")
+                return 1
         return 0
     finally:
         if staging is not None and staging.exists():
